@@ -14,8 +14,8 @@ from py3xui import AsyncApi
 BOT_TOKEN = "8473341751:AAFV9yIIxbwTO5t-WvkG_9wEB9QOA65jvPM"
 
 PANEL_HOST = "http://89.127.209.251:23168/229XmnXsbkeTr8J7Xr"
-PANEL_USERNAME = "ZklMcpInoM"
-PANEL_PASSWORD = "jS57thNqgw"
+PANEL_USERNAME = "Orochimaru"
+PANEL_PASSWORD = "Navuhodonosor_101"
 # -----------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
