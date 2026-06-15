@@ -1,5 +1,4 @@
 # panel_api.py
-import asyncio
 import logging
 import time
 import uuid

@@ -24,6 +24,7 @@ from keyboards import get_main_keyboard, get_buy_keyboard, get_account_keyboard
 class BuyStates(StatesGroup):
     choosing_period = State()
 
+
 # ----- Команда /start -----
 async def cmd_start(message: types.Message):
     args = message.text.split()
@@ -48,6 +49,7 @@ async def cmd_start(message: types.Message):
     text += "\nИспользуйте кнопки меню для управления подпиской."
     await message.answer(text, reply_markup=get_main_keyboard())
 
+
 # ----- Команда /my (личный кабинет) -----
 async def cmd_my(message: types.Message):
     user_id = message.from_user.id
@@ -68,10 +70,12 @@ async def cmd_my(message: types.Message):
     text = f"📊 **Ваш личный кабинет**\n\nСтатус подписки: {status}\nТариф: Безлимит\n\nВыберите действие:"
     await message.answer(text, parse_mode="Markdown", reply_markup=get_account_keyboard())
 
+
 # ----- Команда /links -----
 async def cmd_links(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
+    logging.info(f"cmd_links: user_id={user_id}, user={user}, sub_end={user['subscription_end'] if user else None}")
     if not user or user['subscription_end'] <= int(time.time() * 1000):
         await message.answer("❌ Нет активной подписки.")
         return
@@ -82,13 +86,20 @@ async def cmd_links(message: types.Message):
             link = get_client_link(remark, base_uuid, user_id)
             links[remark] = link
 
-        text = "🔗 *Ваши конфигурации для подключения*\n\n"
-        text += "⚠️ *Как использовать:*\n• Нажмите на ссылку (на телефоне) — откроется VPN-клиент.\n• На компьютере — скопируйте ссылку и вставьте вручную.\n\n"
+        # Собираем текст в спойлер
+        spoiler_lines = []
         for proto, link in links.items():
-            text += f"*{proto}*\n`{link}`\n\n"
-        await message.answer(text, parse_mode="Markdown")
+            spoiler_lines.append(f"*{proto}*: `{link}`")
+        spoiler_text = "\n\n".join(spoiler_lines)
+
+        # Оборачиваем в спойлер
+        full_text = (f"🔗 *Ваши конфигурации*\n\n||{spoiler_text}||\n\n⚠️ *Как использовать:*\n• Cкопируйте ссылку и "
+                     f"вставьте в клиент.")
+
+        await message.answer(full_text, parse_mode="Markdown")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
+
 
 # ----- Команда /referral -----
 async def cmd_referral(message: types.Message):
@@ -100,12 +111,17 @@ async def cmd_referral(message: types.Message):
     bot_info = await message.bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
     count = get_referrals_count(user_id)
-    await message.answer(f"👥 **Реферальная программа**\n\nПриглашайте друзей -> +30 дней за каждого купившего.\nВаша ссылка:\n`{ref_link}`\n\nПриглашено: {count}", parse_mode="Markdown")
+    await message.answer(
+        f"👥 **Реферальная программа**\n\nПриглашайте друзей -> +30 дней за каждого купившего.\n"
+        f"Ваша ссылка:\n`{ref_link}`\n\nПриглашено: {count}",
+        parse_mode="Markdown")
+
 
 # ----- Команда /buy -----
 async def cmd_buy(message: types.Message, state: FSMContext):
     await state.set_state(BuyStates.choosing_period)
     await message.answer("🛒 Выберите период подписки:", reply_markup=get_buy_keyboard())
+
 
 # ----- Callback обработчики -----
 async def process_buy_callback(callback: types.CallbackQuery, state: FSMContext):
@@ -135,8 +151,10 @@ async def process_buy_callback(callback: types.CallbackQuery, state: FSMContext)
     await callback.answer()
     await state.clear()
 
+
 async def pre_checkout_handler(query: PreCheckoutQuery):
     await query.answer(ok=True)
+
 
 async def successful_payment_handler(message: types.Message):
     payment = message.successful_payment
@@ -193,9 +211,11 @@ async def successful_payment_handler(message: types.Message):
                 mark_reward_given(referrer_id, user_id)
                 try:
                     await message.bot.send_message(referrer_id,
-                                           f"🎁 Ваш друг @{message.from_user.username} купил подписку!\nВы получили +30 дней бесплатно!")
+                                                   f"🎁 Ваш друг @{message.from_user.username} купил подписку!\nВы "
+                                                   f"получили +30 дней бесплатно!")
                 except:
                     pass
+
 
 # ----- Тестовая подписка (опционально) -----
 async def cmd_test(message: types.Message):
@@ -207,7 +227,10 @@ async def cmd_test(message: types.Message):
 
     if user['subscription_end'] > int(time.time() * 1000):
         expiry_date = datetime.fromtimestamp(user['subscription_end'] / 1000).strftime("%d.%m.%Y %H:%M")
-        await message.answer(f"ℹ️ У вас уже есть активная подписка до **{expiry_date}**\nИспользуйте /links для получения ссылок или /buy для продления.", parse_mode="Markdown")
+        await message.answer(
+            f"ℹ️ У вас уже есть активная подписка до **{expiry_date}**\nИспользуйте /links для получения ссылок или "
+            f"/buy для продления.",
+            parse_mode="Markdown")
         return
 
     await message.answer("🔄 Выдаю ТЕСТОВУЮ подписку на 30 дней...")
@@ -220,6 +243,7 @@ async def cmd_test(message: types.Message):
     except Exception as e:
         logging.error(f"Ошибка test: {e}")
         await message.answer(f"❌ Ошибка: {str(e)}")
+
 
 # ----- Админ-команды -----
 async def cmd_admin(message: types.Message):
@@ -237,8 +261,10 @@ async def cmd_admin(message: types.Message):
     cur.execute("SELECT COUNT(*) FROM payments WHERE status='paid'")
     total_payments = cur.fetchone()[0]
     conn.close()
-    text = f"📊 **Статистика**\n\n👥 Всего пользователей: {total_users}\n✅ Активных подписок: {active_users}\n💰 Оплат (всего): {total_payments}"
+    text = (f'📊 **Статистика**\n\n👥 Всего пользователей: {total_users}\n✅ Активных подписок: {active_users}\n💰 '
+            f'Оплат (всего): {total_payments}')
     await message.answer(text, parse_mode="Markdown")
+
 
 async def cmd_broadcast(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -265,26 +291,63 @@ async def cmd_broadcast(message: types.Message):
             pass
     await message.answer(f"✅ Рассылка завершена. Отправлено {sent} из {len(users)} пользователей.")
 
+
 # ----- Прочие команды -----
 async def cmd_support(message: types.Message):
     await message.answer("📞 Поддержка: @your_support")
+
 
 async def cmd_cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Отменено.")
 
+
 async def inline_links(callback: types.CallbackQuery):
     await callback.answer()
-    await cmd_links(callback.message)
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    now_ms = int(time.time() * 1000)
+    if not user or user['subscription_end'] <= now_ms:
+        await callback.message.answer("❌ Нет активной подписки.")
+        return
+    try:
+        base_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{user_id}"))
+        links = {}
+        for remark in INBOUND_REMARKS:
+            link = get_client_link(remark, base_uuid, user_id)
+            links[remark] = link
+
+        # Компактный вывод в спойлере
+        spoiler_lines = []
+        for proto, link in links.items():
+            spoiler_lines.append(f"*{proto}*: `{link}`")
+        spoiler_text = "\n\n".join(spoiler_lines)
+        full_text = (
+            "🔗 *Ваши конфигурации*\n\n"
+            f"||{spoiler_text}||\n\n"
+            "⚠️ *Как использовать:*\n"
+            "• На телефоне: нажмите на ссылку → откроется VPN-клиент.\n"
+            "• На ПК: скопируйте ссылку и вставьте вручную."
+        )
+        await callback.message.answer(full_text, parse_mode="Markdown")
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {e}")
+
 
 async def inline_instructions(callback: types.CallbackQuery):
     await callback.answer()
-    text = "📖 **Инструкция по подключению**\n\n1. Скачайте VPN-клиент: [NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid/releases) (Android), [V2RayNG](https://github.com/2dust/v2rayNG/releases) (Android), [Hiddify](https://hiddify.com/) (iOS/Android/Windows)\n2. Скопируйте ссылку из команды /links\n3. Откройте приложение → Добавить конфигурацию → Импорт из буфера обмена.\n4. Подключитесь."
+    text = ("📖 **Инструкция по подключению**\n\n1. Скачайте VPN-клиент: [NekoBox]("
+            "https://github.com/MatsuriDayo/NekoBoxForAndroid/releases) (Android), [V2RayNG]("
+            "https://github.com/2dust/v2rayNG/releases) (Android), [Hiddify](https://hiddify.com/) ("
+            "iOS/Android/Windows)\n2. Скопируйте ссылку из команды /links\n3. Откройте приложение → Добавить "
+            "конфигурацию → Импорт из буфера обмена.\n4. Подключитесь.")
     await callback.message.answer(text, parse_mode="Markdown", disable_web_page_preview=True)
+
 
 async def inline_renew(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     await cmd_buy(callback.message, state)
+
 
 # ----- Регистрация хендлеров -----
 def register_handlers(dp: Dispatcher):
@@ -299,6 +362,15 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(cmd_support, Command("support"))
     dp.message.register(cmd_cancel, Command("cancel"))
 
+    # Reply-кнопки главного меню
+    dp.message.register(text_my_subscription, lambda m: m.text == "📋 Моя подписка")
+    dp.message.register(text_buy, lambda m: m.text == "🛒 Купить")
+    dp.message.register(text_links, lambda m: m.text == "🔗 Ссылки")
+    dp.message.register(text_referral, lambda m: m.text == "👥 Рефералы")
+    dp.message.register(text_support, lambda m: m.text == "❓ Поддержка")
+    if TEST_DAYS:
+        dp.message.register(text_test, lambda m: m.text == "🧪 Тестовая подписка")
+
     dp.callback_query.register(process_buy_callback, lambda c: c.data.startswith("buy_"))
     dp.callback_query.register(inline_links, lambda c: c.data == "get_links")
     dp.callback_query.register(inline_instructions, lambda c: c.data == "instructions")
@@ -306,3 +378,28 @@ def register_handlers(dp: Dispatcher):
 
     dp.pre_checkout_query.register(pre_checkout_handler)
     dp.message.register(successful_payment_handler, lambda m: m.successful_payment is not None)
+
+
+# ----- Обработчики текстовых сообщений (Reply-кнопки) -----
+async def text_my_subscription(message: types.Message):
+    await cmd_my(message)
+
+
+async def text_buy(message: types.Message, state: FSMContext):
+    await cmd_buy(message, state)
+
+
+async def text_links(message: types.Message):
+    await cmd_links(message)
+
+
+async def text_referral(message: types.Message):
+    await cmd_referral(message)
+
+
+async def text_support(message: types.Message):
+    await cmd_support(message)
+
+
+async def text_test(message: types.Message):
+    await cmd_test(message)
