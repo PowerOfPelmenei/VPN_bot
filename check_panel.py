@@ -5,7 +5,8 @@ PANEL_URL = "https://nl-panel.konoha.us.ci:30251/ae7kqDyXatmoYxj5KG/panel/"
 PANEL_USERNAME = "Orochimaru"
 PANEL_PASSWORD = "Navuhodonosor_101"
 
-xui = Api(PANEL_URL, PANEL_USERNAME, PANEL_PASSWORD, verify=False)
+# Создаем объект Api (без verify)
+xui = Api(PANEL_URL, PANEL_USERNAME, PANEL_PASSWORD)
 xui.login()
 
 print("=" * 50)
