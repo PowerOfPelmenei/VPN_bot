@@ -1,7 +1,7 @@
 from py3xui import Api
 
 # Ваши данные
-PANEL_URL = "https://nl-panel.konoha.us.ci:30251/ae7kqDyXatmoYxj5KG"
+PANEL_URL = "https://ru-panel.konoha.us.ci:23168/229XmnXsbkeTr8J7Xr"
 PANEL_USERNAME = "Orochimaru"
 PANEL_PASSWORD = "Navuhodonosor_101"
 
