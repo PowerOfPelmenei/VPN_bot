@@ -1,43 +1,52 @@
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
-from config import BOT_TOKEN
+import config
+from handlers import router, init_panel_api
 from database import init_db
-from panel_api import refresh_inbounds_cache
-from handlers import register_handlers
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+async def set_commands(bot: Bot):
+    """Установка команд бота"""
+    commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="status", description="Статус подписки"),
+        BotCommand(command="buy", description="Купить подписку"),
+        BotCommand(command="help", description="Помощь"),
+    ]
+    await bot.set_my_commands(commands)
+
 
 async def main():
-    # Настройка логирования
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-
-    # Инициализация бота и диспетчера
-    bot = Bot(token=BOT_TOKEN)
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
-
     # Инициализация базы данных
     init_db()
-    logging.info("✅ База данных инициализирована")
+    logger.info("База данных инициализирована")
 
-    # Загрузка кэша инбаундов из панели 3x-ui
+    # Инициализация API панели
+    init_panel_api()
+    logger.info("API панели инициализирован")
+
+    # Создание бота
+    bot = Bot(token=config.BOT_TOKEN)
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    # Установка команд
+    await set_commands(bot)
+
+    # Запуск бота
+    logger.info("Бот запущен")
     try:
-        await refresh_inbounds_cache()
-        logging.info("✅ Подключено к 3x-ui, кэш инбаундов загружен")
-    except Exception as e:
-        logging.error(f"⚠️ Ошибка подключения к панели 3x-ui: {e}")
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
-    # Регистрация всех обработчиков
-    register_handlers(dp)
-    logging.info("✅ Обработчики зарегистрированы")
-
-    # Запуск поллинга
-    logging.info("🚀 Бот запущен и начал приём сообщений")
-    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())

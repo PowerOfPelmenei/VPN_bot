@@ -1,405 +1,483 @@
-# handlers.py
 import asyncio
-import logging
-import time
-import uuid
-from datetime import datetime
-
-from aiogram import Bot, Dispatcher, types
+from datetime import datetime, timedelta
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import LabeledPrice, PreCheckoutQuery
 
-from config import PRICES, DAYS_MAP, TEST_DAYS, FREE_TRIAL_DAYS, ADMIN_IDS, INBOUND_REMARKS
 from database import (
-    get_user, create_user, mark_free_trial_used, add_payment,
-    is_reward_given, mark_reward_given, update_subscription_end,
-    get_referrals_count
+    get_user, create_user, update_user_subscription,
+    deactivate_subscription, add_payment, update_payment_status
 )
-from panel_api import create_or_update_subscription, get_client_link
-from keyboards import get_main_keyboard, get_buy_keyboard, get_account_keyboard
+from panel_api import AsyncPanelAPI
+from keyboards import (
+    get_main_keyboard, get_tariff_keyboard,
+    get_back_keyboard, get_subscription_info_keyboard
+)
+import config
+
+router = Router()
+
+# Инициализируем API панели (будет создан при старте бота)
+panel_api: AsyncPanelAPI = None
 
 
-class BuyStates(StatesGroup):
-    choosing_period = State()
+def init_panel_api():
+    """Инициализация API панели (вызывается при старте бота)"""
+    global panel_api
+    panel_api = AsyncPanelAPI(
+        config.PANEL_URL,
+        config.SUB_URL,
+        config.SUB_PATH,
+        config.XUI_TOKEN
+    )
 
 
-# ----- Команда /start -----
-async def cmd_start(message: types.Message):
-    args = message.text.split()
-    referrer_id = None
-    if len(args) > 1 and args[1].startswith("ref_"):
-        try:
-            referrer_id = int(args[1].split("_")[1])
-        except:
-            pass
+# --- Вспомогательные функции ---
 
-    user_id = message.from_user.id
-    username = message.from_user.username
-    existing = get_user(user_id)
-    if not existing:
-        create_user(user_id, username, referrer_id)
-        text = "🎉 Добро пожаловать! Вы зарегистрированы.\n"
-        if referrer_id and referrer_id != user_id:
-            text += f"✅ Вы были приглашены пользователем {referrer_id}.\n"
-    else:
-        text = "👋 С возвращением!\n"
-
-    text += "\nИспользуйте кнопки меню для управления подпиской."
-    await message.answer(text, reply_markup=get_main_keyboard())
+def format_date(timestamp_ms: int) -> str:
+    """Преобразует миллисекунды в читаемую дату"""
+    if timestamp_ms == 0:
+        return "Бессрочно"
+    dt = datetime.fromtimestamp(timestamp_ms / 1000)
+    return dt.strftime("%d.%m.%Y %H:%M")
 
 
-# ----- Команда /my (личный кабинет) -----
-async def cmd_my(message: types.Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user:
-        await message.answer("❌ Сначала /start")
-        return
-    sub_end_ms = user['subscription_end']
-    now_ms = int(time.time() * 1000)
-    active = sub_end_ms > now_ms
-    if active:
-        days_left = (sub_end_ms - now_ms) // (86400 * 1000)
-        expiry_date = datetime.fromtimestamp(sub_end_ms / 1000).strftime("%d.%m.%Y %H:%M")
-        status = f"✅ Активна до **{expiry_date}**\n📅 Осталось дней: {days_left}"
-    else:
-        status = "❌ Не активна"
-
-    text = f"📊 **Ваш личный кабинет**\n\nСтатус подписки: {status}\nТариф: Безлимит\n\nВыберите действие:"
-    await message.answer(text, parse_mode="Markdown", reply_markup=get_account_keyboard())
-
-
-# ----- Команда /links -----
-async def cmd_links(message: types.Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    logging.info(f"cmd_links: user_id={user_id}, user={user}, sub_end={user['subscription_end'] if user else None}")
-    if not user or user['subscription_end'] <= int(time.time() * 1000):
-        await message.answer("❌ Нет активной подписки.")
-        return
+async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> bool:
+    """Активация подписки (общая логика)"""
     try:
-        base_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{user_id}"))
-        links = {}
-        for remark in INBOUND_REMARKS:
-            link = get_client_link(remark, base_uuid, user_id)
-            links[remark] = link
+        email = f"user_{user_id}"
 
-        # Собираем текст в спойлер
-        spoiler_lines = []
-        for proto, link in links.items():
-            spoiler_lines.append(f"*{proto}*: `{link}`")
-        spoiler_text = "\n\n".join(spoiler_lines)
+        # Обновляем группу и срок в панели
+        expire_time_ms = int((datetime.now() + timedelta(days=tariff["days"])).timestamp() * 1000)
 
-        # Оборачиваем в спойлер
-        full_text = (f"🔗 *Ваши конфигурации*\n\n||{spoiler_text}||\n\n⚠️ *Как использовать:*\n• Cкопируйте ссылку и "
-                     f"вставьте в клиент.")
+        # Обновляем клиента
+        result = await panel_api.update_client(
+            email,
+            group=tariff["group"],
+            expiryTime=expire_time_ms,
+            enable=True
+        )
 
-        await message.answer(full_text, parse_mode="Markdown")
+        if not result.get("success"):
+            # Если клиент не найден, создаем нового
+            create_result = await panel_api.create_client(email, tariff["group"], tariff["days"])
+            if not create_result.get("success"):
+                return False
+
+            # Получаем subId
+            client_data = await panel_api.get_client_by_email(email)
+            if client_data:
+                client = client_data.get("client", {})
+                sub_id = client.get("subId")
+            else:
+                sub_id = None
+        else:
+            # Получаем subId после обновления
+            client_data = await panel_api.get_client_by_email(email)
+            if client_data:
+                client = client_data.get("client", {})
+                sub_id = client.get("subId")
+            else:
+                sub_id = None
+
+        # Обновляем БД
+        update_user_subscription(
+            user_id,
+            tariff_key,
+            tariff["days"],
+            tariff["group"],
+            sub_id
+        )
+
+        return True
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        print(f"Ошибка активации подписки: {e}")
+        return False
 
 
-# ----- Команда /referral -----
-async def cmd_referral(message: types.Message):
+# --- Обработчики команд ---
+
+@router.message(Command("start"))
+async def cmd_start(message: Message):
     user_id = message.from_user.id
+
+    # Получаем или создаем пользователя
     user = get_user(user_id)
     if not user:
-        await message.answer("❌ /start")
-        return
-    bot_info = await message.bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
-    count = get_referrals_count(user_id)
+        user = create_user(user_id)
+
+        # Создаем клиента в панели с группой users
+        if panel_api:
+            try:
+                result = await panel_api.create_client(
+                    email=f"user_{user_id}",
+                    group_name="users",
+                    expire_days=0  # бессрочно, но без доступа
+                )
+                if result.get("success"):
+                    # Получаем subId
+                    client_data = await panel_api.get_client_by_email(f"user_{user_id}")
+                    if client_data:
+                        client = client_data.get("client", {})
+                        sub_id = client.get("subId")
+                        if sub_id:
+                            # Обновляем sub_id в базе
+                            update_user_subscription(
+                                user_id,
+                                tariff="users",
+                                days=0,
+                                group="users",
+                                sub_id=sub_id
+                            )
+            except Exception as e:
+                print(f"Ошибка создания клиента: {e}")
+
     await message.answer(
-        f"👥 **Реферальная программа**\n\nПриглашайте друзей -> +30 дней за каждого купившего.\n"
-        f"Ваша ссылка:\n`{ref_link}`\n\nПриглашено: {count}",
-        parse_mode="Markdown")
+        f"👋 Привет, {message.from_user.full_name}!\n\n"
+        "Я бот для управления VPN-подпиской.\n"
+        "Выберите действие:",
+        reply_markup=get_main_keyboard()
+    )
 
 
-# ----- Команда /buy -----
-async def cmd_buy(message: types.Message, state: FSMContext):
-    await state.set_state(BuyStates.choosing_period)
-    await message.answer("🛒 Выберите период подписки:", reply_markup=get_buy_keyboard())
+@router.message(Command("help"))
+@router.callback_query(F.data == "help")
+async def cmd_help(event):
+    text = (
+        "ℹ️ <b>Помощь</b>\n\n"
+        "📌 <b>Команды:</b>\n"
+        "/start - Главное меню\n"
+        "/status - Проверить статус подписки\n"
+        "/buy - Купить подписку\n"
+        "/help - Помощь\n\n"
+        "💡 <b>Как подключиться:</b>\n"
+        "1. Купите подписку\n"
+        "2. Получите ссылку\n"
+        "3. Импортируйте в приложение (V2RayNG, Nekoray, Hiddify)\n\n"
+        "❓ Вопросы: @support"
+    )
+
+    if isinstance(event, Message):
+        await event.answer(text, parse_mode="HTML")
+    else:
+        await event.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
 
 
-# ----- Callback обработчики -----
-async def process_buy_callback(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    data = callback.data
-    if data == "buy_cancel":
-        await state.clear()
-        await callback.message.edit_text("❌ Покупка отменена.")
-        await callback.answer()
+@router.message(Command("status"))
+@router.callback_query(F.data == "status")
+async def cmd_status(event):
+    user_id = event.from_user.id
+    user = get_user(user_id)
+
+    if not user:
+        if isinstance(event, Message):
+            await event.answer("❌ Вы не зарегистрированы. Используйте /start")
+        else:
+            await event.answer("❌ Вы не зарегистрированы", show_alert=True)
         return
 
-    months = int(data.split("_")[1])
-    amount = PRICES[months]
-    payment_id = f"pay_{user_id}_{int(time.time())}"
-    add_payment(payment_id, user_id, amount, months, "pending")
-    prices = [LabeledPrice(label=f"VPN подписка {months} мес.", amount=amount)]
-    await callback.bot.send_invoice(
-        chat_id=user_id,
-        title="VPN подписка",
-        description=f"Доступ ко всем протоколам на {months} месяц(ев). Безлимитный трафик.",
-        payload=payment_id,
-        provider_token="",
-        currency="XTR",
-        prices=prices,
-        start_parameter="vpn_subscription"
+    # Получаем данные из панели
+    if panel_api:
+        try:
+            client_data = await panel_api.get_client_by_email(f"user_{user_id}")
+            if client_data:
+                client = client_data.get("client", {})
+                expiry_time = client.get("expiryTime", 0)
+                is_enable = client.get("enable", False)
+                group = client.get("group", "users")
+
+                # Проверяем, активна ли подписка
+                if expiry_time > 0 and expiry_time < datetime.now().timestamp() * 1000:
+                    is_enable = False
+                    await deactivate_subscription(user_id)
+
+                status_text = "✅ <b>Активна</b>" if is_enable else "❌ <b>Не активна</b>"
+                expiry_text = format_date(expiry_time) if expiry_time > 0 else "Не установлена"
+
+                # Получаем ссылку
+                sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
+                link_text = f"\n\n🔗 <b>Ссылка для подключения:</b>\n<code>{sub_url}</code>" if sub_url else ""
+
+                await event.message.edit_text(
+                    f"📊 <b>Ваш статус подписки</b>\n\n"
+                    f"Статус: {status_text}\n"
+                    f"Группа: {group}\n"
+                    f"Истекает: {expiry_text}\n"
+                    f"{link_text}",
+                    parse_mode="HTML",
+                    reply_markup=get_subscription_info_keyboard() if is_enable else get_main_keyboard()
+                )
+                return
+        except Exception as e:
+            print(f"Ошибка получения данных из панели: {e}")
+
+    # Fallback: данные из БД
+    status_text = "✅ <b>Активна</b>" if user.subscription_active else "❌ <b>Не активна</b>"
+    expiry_text = user.subscription_end.strftime("%d.%m.%Y %H:%M") if user.subscription_end else "Не установлена"
+
+    await event.message.edit_text(
+        f"📊 <b>Ваш статус подписки</b>\n\n"
+        f"Статус: {status_text}\n"
+        f"Тариф: {user.tariff or 'Не выбран'}\n"
+        f"Истекает: {expiry_text}\n",
+        parse_mode="HTML",
+        reply_markup=get_subscription_info_keyboard() if user.subscription_active else get_main_keyboard()
+    )
+
+
+@router.message(Command("buy"))
+@router.callback_query(F.data == "buy")
+async def cmd_buy(event):
+    user_id = event.from_user.id
+
+    user = get_user(user_id)
+    if not user:
+        if isinstance(event, Message):
+            await event.answer("❌ Вы не зарегистрированы. Используйте /start")
+        else:
+            await event.answer("❌ Вы не зарегистрированы", show_alert=True)
+        return
+
+    text = (
+        "💎 <b>Выберите тариф:</b>\n\n"
+        "🎁 <b>Пробный период</b> - 3 дня бесплатно\n"
+        "💎 <b>1 месяц</b> - 100 ⭐ Stars\n"
+        "💎 <b>3 месяца</b> - 250 ⭐ Stars\n\n"
+        "⭐ <b>Как оплатить Stars?</b>\n"
+        "1. Нажмите на кнопку с тарифом\n"
+        "2. Подтвердите платеж в Telegram\n"
+        "3. После оплаты подписка активируется автоматически"
+    )
+
+    if isinstance(event, Message):
+        await event.answer(text, parse_mode="HTML", reply_markup=get_tariff_keyboard())
+    else:
+        await event.message.edit_text(text, parse_mode="HTML", reply_markup=get_tariff_keyboard())
+
+
+@router.callback_query(F.data == "back_to_menu")
+async def cmd_back_to_menu(callback: CallbackQuery):
+    """Возврат в главное меню"""
+    await callback.message.edit_text(
+        "👋 Выберите действие:",
+        reply_markup=get_main_keyboard()
     )
     await callback.answer()
-    await state.clear()
 
 
-async def pre_checkout_handler(query: PreCheckoutQuery):
-    await query.answer(ok=True)
-
-
-async def successful_payment_handler(message: types.Message):
-    payment = message.successful_payment
-    payment_id = payment.invoice_payload
-    user_id = message.from_user.id
-    # получение months из БД
-    import sqlite3
-    from config import DB_PATH
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT months FROM payments WHERE payment_id = ?", (payment_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        await message.answer("❌ Ошибка: не найден платёж.")
-        return
-    months = row[0]
-    days = DAYS_MAP[months]
-
-    # обновить статус платежа
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("UPDATE payments SET status = 'paid' WHERE payment_id = ?", (payment_id,))
-    conn.commit()
-    conn.close()
-
-    await message.answer("🔄 Создаю VPN-доступ...")
-    try:
-        links = await create_or_update_subscription(user_id, days)
-        text = "✅ **Оплата прошла успешно!**\n\nВаши конфигурации:\n\n"
-        for proto, link in links.items():
-            text += f"🔹 **{proto}**\n`{link}`\n\n"
-        await message.answer(text, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Ошибка после оплаты: {e}")
-        await message.answer(f"❌ Ошибка: {e}")
-
-    # Реферальная программа
-    user = get_user(user_id)
-    referrer_id = user.get('referrer_id')
-    if referrer_id and not is_reward_given(referrer_id, user_id):
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM payments WHERE user_id = ? AND status = 'paid'", (user_id,))
-        previous_payment = cur.fetchone()
-        conn.close()
-        if not previous_payment:
-            referrer = get_user(referrer_id)
-            if referrer:
-                current_end_ms = referrer['subscription_end']
-                now_ms = int(time.time() * 1000)
-                new_end_ms = max(current_end_ms, now_ms) + 30 * 86400 * 1000
-                update_subscription_end(referrer_id, new_end_ms)
-                mark_reward_given(referrer_id, user_id)
-                try:
-                    await message.bot.send_message(referrer_id,
-                                                   f"🎁 Ваш друг @{message.from_user.username} купил подписку!\nВы "
-                                                   f"получили +30 дней бесплатно!")
-                except:
-                    pass
-
-
-# ----- Тестовая подписка (опционально) -----
-async def cmd_test(message: types.Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user:
-        create_user(user_id, message.from_user.username)
-        user = get_user(user_id)
-
-    if user['subscription_end'] > int(time.time() * 1000):
-        expiry_date = datetime.fromtimestamp(user['subscription_end'] / 1000).strftime("%d.%m.%Y %H:%M")
-        await message.answer(
-            f"ℹ️ У вас уже есть активная подписка до **{expiry_date}**\nИспользуйте /links для получения ссылок или "
-            f"/buy для продления.",
-            parse_mode="Markdown")
-        return
-
-    await message.answer("🔄 Выдаю ТЕСТОВУЮ подписку на 30 дней...")
-    try:
-        links = await create_or_update_subscription(user_id, TEST_DAYS, ignore_trial_flag=True)
-        text = "✅ **Тестовая подписка активирована!**\n\n🗓 Срок действия: 30 дней\n\nВаши конфигурации:\n\n"
-        for proto, link in links.items():
-            text += f"🔹 **{proto}**\n`{link}`\n\n"
-        await message.answer(text, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Ошибка test: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
-
-
-# ----- Админ-команды -----
-async def cmd_admin(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("⛔ Доступ запрещён.")
-        return
-    import sqlite3
-    from config import DB_PATH
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM users")
-    total_users = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM users WHERE subscription_end > ?", (int(time.time() * 1000),))
-    active_users = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM payments WHERE status='paid'")
-    total_payments = cur.fetchone()[0]
-    conn.close()
-    text = (f'📊 **Статистика**\n\n👥 Всего пользователей: {total_users}\n✅ Активных подписок: {active_users}\n💰 '
-            f'Оплат (всего): {total_payments}')
-    await message.answer(text, parse_mode="Markdown")
-
-
-async def cmd_broadcast(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("⛔ Доступ запрещён.")
-        return
-    text = message.text.replace("/broadcast", "", 1).strip()
-    if not text:
-        await message.answer("❌ Укажите текст рассылки после /broadcast")
-        return
-    import sqlite3
-    from config import DB_PATH
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM users")
-    users = cur.fetchall()
-    conn.close()
-    sent = 0
-    for (user_id,) in users:
-        try:
-            await message.bot.send_message(user_id, text, parse_mode="Markdown")
-            sent += 1
-            await asyncio.sleep(0.05)
-        except:
-            pass
-    await message.answer(f"✅ Рассылка завершена. Отправлено {sent} из {len(users)} пользователей.")
-
-
-# ----- Прочие команды -----
-async def cmd_support(message: types.Message):
-    await message.answer("📞 Поддержка: @your_support")
-
-
-async def cmd_cancel(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Отменено.")
-
-
-async def inline_links(callback: types.CallbackQuery):
-    await callback.answer()
+@router.callback_query(F.data.startswith("tariff_"))
+async def process_tariff(callback: CallbackQuery):
+    tariff_key = callback.data.replace("tariff_", "")
     user_id = callback.from_user.id
-    user = get_user(user_id)
-    now_ms = int(time.time() * 1000)
-    if not user or user['subscription_end'] <= now_ms:
-        await callback.message.answer("❌ Нет активной подписки.")
+
+    if tariff_key not in config.TARIFFS:
+        await callback.answer("❌ Неверный тариф", show_alert=True)
         return
-    try:
-        base_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{user_id}"))
-        links = {}
-        for remark in INBOUND_REMARKS:
-            link = get_client_link(remark, base_uuid, user_id)
-            links[remark] = link
 
-        # Компактный вывод в спойлере
-        spoiler_lines = []
-        for proto, link in links.items():
-            spoiler_lines.append(f"*{proto}*: `{link}`")
-        spoiler_text = "\n\n".join(spoiler_lines)
-        full_text = (
-            "🔗 *Ваши конфигурации*\n\n"
-            f"||{spoiler_text}||\n\n"
-            "⚠️ *Как использовать:*\n"
-            "• На телефоне: нажмите на ссылку → откроется VPN-клиент.\n"
-            "• На ПК: скопируйте ссылку и вставьте вручную."
+    tariff = config.TARIFFS[tariff_key]
+
+    # Проверяем, есть ли уже активная подписка
+    user = get_user(user_id)
+    if user and user.subscription_active:
+        # Если тариф бесплатный, не даем продлить
+        if tariff["price"] == 0:
+            await callback.answer("❌ У вас уже есть активная подписка", show_alert=True)
+            return
+
+    # Создаем платеж
+    payment = add_payment(user_id, tariff_key, tariff["price"])
+
+    if tariff["price"] == 0:
+        # Бесплатный тариф (trial)
+        await callback.message.edit_text(
+            f"🎁 <b>Активация пробного периода</b>\n\n"
+            f"Вы выбрали: {tariff['name']}\n"
+            f"Срок: {tariff['days']} дней\n"
+            f"Цена: Бесплатно\n\n"
+            f"⏳ Подписка активируется...",
+            parse_mode="HTML"
         )
-        await callback.message.answer(full_text, parse_mode="Markdown")
+
+        # Активируем подписку
+        success = await activate_subscription(user_id, tariff_key, tariff)
+
+        if success:
+            # Получаем ссылку
+            sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
+
+            await callback.message.edit_text(
+                f"✅ <b>Пробный период активирован!</b>\n\n"
+                f"Тариф: {tariff['name']}\n"
+                f"Срок: {tariff['days']} дней\n\n"
+                f"🔗 <b>Ваша ссылка:</b>\n"
+                f"<code>{sub_url}</code>\n\n"
+                f"📱 Импортируйте ссылку в приложение",
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await callback.message.edit_text(
+                "❌ <b>Ошибка активации</b>\n\n"
+                "Не удалось активировать подписку. Попробуйте позже.",
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard()
+            )
+    else:
+        # Платный тариф
+        await callback.message.edit_text(
+            f"💎 <b>Оплата подписки</b>\n\n"
+            f"Тариф: {tariff['name']}\n"
+            f"Срок: {tariff['days']} дней\n"
+            f"Цена: {tariff['price']} ⭐ Stars\n\n"
+            f"⏳ Ожидайте подтверждения платежа...",
+            parse_mode="HTML"
+        )
+
+        # Отправляем запрос на оплату через Telegram Stars
+        try:
+            # Создаем инвойс
+            await callback.bot.send_invoice(
+                chat_id=user_id,
+                title=f"VPN {tariff['name']}",
+                description=f"Подписка на {tariff['days']} дней",
+                payload=f"payment_{payment.id}",
+                currency="XTR",  # Telegram Stars
+                prices=[{"label": tariff['name'], "amount": tariff['price']}],
+                provider_token="",  # Для Stars не нужен
+                start_parameter="vpn_bot"
+            )
+
+            await callback.message.edit_text(
+                f"💎 <b>Ожидание оплаты</b>\n\n"
+                f"Тариф: {tariff['name']}\n"
+                f"Сумма: {tariff['price']} ⭐ Stars\n\n"
+                f"📩 Нажмите на кнопку <b>Оплатить</b> в сообщении ниже",
+                parse_mode="HTML",
+                reply_markup=get_back_keyboard()
+            )
+        except Exception as e:
+            print(f"Ошибка создания инвойса: {e}")
+            await callback.message.edit_text(
+                "❌ <b>Ошибка создания платежа</b>\n\n"
+                "Попробуйте позже.",
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard()
+            )
+
+
+@router.callback_query(F.data == "refresh")
+async def cmd_refresh(callback: CallbackQuery):
+    """Обновить ссылку подписки"""
+    user_id = callback.from_user.id
+
+    if not panel_api:
+        await callback.answer("⏳ Сервис временно недоступен", show_alert=True)
+        return
+
+    try:
+        sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
+        if sub_url:
+            await callback.message.edit_text(
+                f"🔗 <b>Ваша ссылка для подключения</b>\n\n"
+                f"<code>{sub_url}</code>\n\n"
+                f"📱 Импортируйте эту ссылку в приложение:\n"
+                f"• V2RayNG\n"
+                f"• Nekoray\n"
+                f"• Hiddify\n"
+                f"• и другие",
+                parse_mode="HTML",
+                reply_markup=get_subscription_info_keyboard()
+            )
+        else:
+            # Проверяем, есть ли активная подписка
+            user = get_user(user_id)
+            if user and user.subscription_active:
+                await callback.message.edit_text(
+                    "❌ <b>Не удалось получить ссылку</b>\n\n"
+                    "Возможно, клиент еще не создан в панели.\n"
+                    "Попробуйте обновить статус через /status",
+                    parse_mode="HTML",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await callback.message.edit_text(
+                    "❌ <b>У вас нет активной подписки</b>\n\n"
+                    "Купите подписку в разделе /buy",
+                    parse_mode="HTML",
+                    reply_markup=get_main_keyboard()
+                )
     except Exception as e:
-        await callback.message.answer(f"❌ Ошибка: {e}")
+        print(f"Ошибка получения ссылки: {e}")
+        await callback.answer("❌ Ошибка получения ссылки", show_alert=True)
 
 
-async def inline_instructions(callback: types.CallbackQuery):
-    await callback.answer()
-    text = ("📖 **Инструкция по подключению**\n\n1. Скачайте VPN-клиент: [NekoBox]("
-            "https://github.com/MatsuriDayo/NekoBoxForAndroid/releases) (Android), [V2RayNG]("
-            "https://github.com/2dust/v2rayNG/releases) (Android), [Hiddify](https://hiddify.com/) ("
-            "iOS/Android/Windows)\n2. Скопируйте ссылку из команды /links\n3. Откройте приложение → Добавить "
-            "конфигурацию → Импорт из буфера обмена.\n4. Подключитесь.")
-    await callback.message.answer(text, parse_mode="Markdown", disable_web_page_preview=True)
+# --- Обработчики платежей ---
+
+@router.pre_checkout_query()
+async def pre_checkout_query_handler(pre_checkout_query):
+    """Обработка предварительного запроса на оплату"""
+    await pre_checkout_query.bot.answer_pre_checkout_query(
+        pre_checkout_query.id,
+        ok=True
+    )
 
 
-async def inline_renew(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await cmd_buy(callback.message, state)
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message):
+    """Обработка успешной оплаты"""
+    user_id = message.from_user.id
+    payment_info = message.successful_payment
 
+    # Извлекаем ID платежа из payload
+    payload = payment_info.invoice_payload
+    payment_id = int(payload.replace("payment_", ""))
 
-# ----- Регистрация хендлеров -----
-def register_handlers(dp: Dispatcher):
-    dp.message.register(cmd_start, Command("start"))
-    dp.message.register(cmd_my, Command("my"))
-    dp.message.register(cmd_links, Command("links"))
-    dp.message.register(cmd_referral, Command("referral"))
-    dp.message.register(cmd_buy, Command("buy"))
-    dp.message.register(cmd_test, Command("test"))
-    dp.message.register(cmd_admin, Command("admin"))
-    dp.message.register(cmd_broadcast, Command("broadcast"))
-    dp.message.register(cmd_support, Command("support"))
-    dp.message.register(cmd_cancel, Command("cancel"))
+    # Обновляем статус платежа
+    payment = update_payment_status(payment_id, "success")
+    if not payment:
+        await message.answer("❌ Ошибка обработки платежа")
+        return
 
-    # Reply-кнопки главного меню
-    dp.message.register(text_my_subscription, lambda m: m.text == "📋 Моя подписка")
-    dp.message.register(text_buy, lambda m: m.text == "🛒 Купить")
-    dp.message.register(text_links, lambda m: m.text == "🔗 Ссылки")
-    dp.message.register(text_referral, lambda m: m.text == "👥 Рефералы")
-    dp.message.register(text_support, lambda m: m.text == "❓ Поддержка")
-    if TEST_DAYS:
-        dp.message.register(text_test, lambda m: m.text == "🧪 Тестовая подписка")
+    # Находим тариф
+    tariff_key = payment.tariff
+    tariff = config.TARIFFS.get(tariff_key)
+    if not tariff:
+        await message.answer("❌ Неизвестный тариф")
+        return
 
-    dp.callback_query.register(process_buy_callback, lambda c: c.data.startswith("buy_"))
-    dp.callback_query.register(inline_links, lambda c: c.data == "get_links")
-    dp.callback_query.register(inline_instructions, lambda c: c.data == "instructions")
-    dp.callback_query.register(inline_renew, lambda c: c.data == "renew")
+    # Активируем подписку
+    await message.answer(
+        f"✅ <b>Оплата получена!</b>\n\n"
+        f"Активируем подписку...",
+        parse_mode="HTML"
+    )
 
-    dp.pre_checkout_query.register(pre_checkout_handler)
-    dp.message.register(successful_payment_handler, lambda m: m.successful_payment is not None)
+    success = await activate_subscription(user_id, tariff_key, tariff)
 
+    if success:
+        # Получаем ссылку
+        sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
 
-# ----- Обработчики текстовых сообщений (Reply-кнопки) -----
-async def text_my_subscription(message: types.Message):
-    await cmd_my(message)
-
-
-async def text_buy(message: types.Message, state: FSMContext):
-    await cmd_buy(message, state)
-
-
-async def text_links(message: types.Message):
-    await cmd_links(message)
-
-
-async def text_referral(message: types.Message):
-    await cmd_referral(message)
-
-
-async def text_support(message: types.Message):
-    await cmd_support(message)
-
-
-async def text_test(message: types.Message):
-    await cmd_test(message)
+        await message.answer(
+            f"✅ <b>Подписка активирована!</b>\n\n"
+            f"Тариф: {tariff['name']}\n"
+            f"Срок: {tariff['days']} дней\n\n"
+            f"🔗 <b>Ваша ссылка:</b>\n"
+            f"<code>{sub_url}</code>\n\n"
+            f"📱 Импортируйте ссылку в приложение",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        await message.answer(
+            "❌ <b>Ошибка активации подписки</b>\n\n"
+            "Платеж получен, но не удалось активировать подписку.\n"
+            "Обратитесь в поддержку: @support",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )

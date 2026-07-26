@@ -1,31 +1,81 @@
-# keyboards.py
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import TEST_DAYS
 
-def get_main_keyboard():
-    """Главная Reply-клавиатура"""
-    buttons = [
-        [KeyboardButton(text="📋 Моя подписка")],
-        [KeyboardButton(text="🛒 Купить"), KeyboardButton(text="🔗 Ссылки")],
-        [KeyboardButton(text="👥 Рефералы"), KeyboardButton(text="❓ Поддержка")]
-    ]
-    if TEST_DAYS:
-        buttons.append([KeyboardButton(text="🧪 Тестовая подписка")])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+def get_main_keyboard() -> InlineKeyboardMarkup:
+    """Главное меню"""
+    builder = InlineKeyboardBuilder()
 
-def get_buy_keyboard():
-    """Инлайн-клавиатура для выбора периода подписки"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 месяц – 300⭐", callback_data="buy_1")],
-        [InlineKeyboardButton(text="3 месяца – 600⭐", callback_data="buy_3")],
-        [InlineKeyboardButton(text="Отмена", callback_data="buy_cancel")]
-    ])
+    builder.row(
+        InlineKeyboardButton(text="📊 Мой статус", callback_data="status")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить ссылку", callback_data="refresh")
+    )
+    builder.row(
+        InlineKeyboardButton(text="💎 Купить подписку", callback_data="buy")
+    )
+    builder.row(
+        InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help")
+    )
 
-def get_account_keyboard():
-    """Инлайн-клавиатура в личном кабинете"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔗 Получить ссылки", callback_data="get_links")],
-        [InlineKeyboardButton(text="📖 Инструкция по подключению", callback_data="instructions")],
-        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="renew")]
-    ])
+    return builder.as_markup()
+
+
+def get_tariff_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура с тарифами"""
+    from config import TARIFFS
+
+    builder = InlineKeyboardBuilder()
+
+    for key, tariff in TARIFFS.items():
+        if tariff["price"] == 0:
+            label = f"🎁 {tariff['name']} - Бесплатно"
+        else:
+            label = f"💎 {tariff['name']} - {tariff['price']} ⭐"
+
+        builder.row(
+            InlineKeyboardButton(text=label, callback_data=f"tariff_{key}")
+        )
+
+    return builder.as_markup()
+
+
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка 'Назад'"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+    )
+    return builder.as_markup()
+
+
+def get_subscription_info_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для информации о подписке"""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить ссылку", callback_data="refresh"),
+        InlineKeyboardButton(text="💎 Продлить", callback_data="buy")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+    )
+
+    return builder.as_markup()
+
+
+def get_admin_keyboard() -> InlineKeyboardMarkup:
+    """Админ-панель (для будущего использования)"""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users"),
+        InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_mailing"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")
+    )
+
+    return builder.as_markup()

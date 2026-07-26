@@ -1,136 +1,274 @@
-# panel_api.py
-import logging
+import httpx
+import json
+import base64
 import time
-import uuid
-import urllib.parse
-from typing import Dict, Optional
-
-import py3xui
-from py3xui import AsyncApi
-from py3xui.inbound import Inbound
-
-from config import (
-    PANEL_HOST, PANEL_USERNAME, PANEL_PASSWORD,
-    INBOUND_REMARKS, LINK_TEMPLATES
-)
-from database import get_user, update_subscription_end
-
-api = AsyncApi(
-    host=PANEL_HOST,
-    username=PANEL_USERNAME,
-    password=PANEL_PASSWORD
-)
-
-_inbounds_by_id: Dict[int, Inbound] = {}
-_remark_to_id: Dict[str, int] = {}
+from urllib.parse import urljoin
+from typing import Optional, Dict, Any, List
 
 
-async def refresh_inbounds_cache():
-    global _inbounds_by_id, _remark_to_id
-    await api.login()
-    inbounds = await api.inbound.get_list()
-    _inbounds_by_id = {ib.id: ib for ib in inbounds}
-    _remark_to_id = {ib.remark: ib.id for ib in inbounds}
-    logging.info(f"Кэш inbound-ов обновлён. Найдено: {len(_inbounds_by_id)}")
+class AsyncPanelAPI:
+    """Асинхронный клиент для работы с 3x-ui панелью"""
 
+    def __init__(self, panel_url: str, sub_url: str, sub_path: str, token: str):
+        """
+        Инициализация API панели
 
-async def get_inbound_by_id(inbound_id: int) -> Optional[Inbound]:
-    if not _inbounds_by_id:
-        await refresh_inbounds_cache()
-    return _inbounds_by_id.get(inbound_id)
+        Args:
+            panel_url: URL панели (например, https://ru-panel.konoha.us.ci:23168/229XmnXsbkeTr8J7Xr)
+            sub_url: URL для подписок (например, https://ru-panel.konoha.us.ci:2096)
+            sub_path: Путь для подписок (например, gdfhskjlfsdfgn)
+            token: Токен авторизации
+        """
+        self.panel_url = panel_url.rstrip('/')
+        self.sub_url = sub_url.rstrip('/')
+        self.sub_path = sub_path.strip('/')
+        self.token = token
 
-
-async def get_inbound_id_by_remark(remark: str) -> Optional[int]:
-    if not _remark_to_id:
-        await refresh_inbounds_cache()
-    return _remark_to_id.get(remark)
-
-
-async def create_or_update_client_in_inbound(inbound_id: int, email: str, uuid_str: str, expiry: int):
-    inbound = await get_inbound_by_id(inbound_id)
-    if not inbound:
-        raise ValueError(f"Inbound {inbound_id} not found")
-
-    existing_client = None
-    for cl in inbound.settings.clients:
-        if cl.email == email:
-            existing_client = cl
-            break
-
-    if existing_client:
-        existing_client.expiry_time = expiry
-        existing_client.total_gb = 0
-        existing_client.enable = True
-        existing_client.password = uuid_str
-
-        if inbound.protocol == 'vless' and inbound.stream_settings and inbound.stream_settings.security == 'reality':
-            existing_client.flow = "xtls-rprx-vision"
-
-        await api.client.update(inbound_id, existing_client)
-        logging.info(f"Обновлён клиент {email} в inbound {inbound_id}")
-    else:
-        new_client = py3xui.Client(
-            id=uuid_str,
-            email=email,
-            password=uuid_str,
-            enable=True,
-            total_gb=0,
-            expiry_time=expiry,
-            limit_ip=0
+        # Создаем асинхронный клиент
+        self.client = httpx.AsyncClient(
+            verify=False,  # Отключаем проверку SSL (для самоподписанных сертификатов)
+            timeout=30.0  # Таймаут на запросы
         )
-        if inbound.protocol == 'vless' and inbound.stream_settings and inbound.stream_settings.security == 'reality':
-            new_client.flow = "xtls-rprx-vision"
 
-        await api.client.add(inbound_id, [new_client])
-        logging.info(f"Создан клиент {email} в inbound {inbound_id}")
+        # Отключаем предупреждения о SSL
+        import warnings
+        warnings.filterwarnings('ignore', message='Unverified HTTPS request')
 
-    # Обновляем кэш после изменений
-    all_inbounds = await api.inbound.get_list()
-    for ib in all_inbounds:
-        _inbounds_by_id[ib.id] = ib
-        _remark_to_id[ib.remark] = ib.id
+    async def _get_headers(self) -> Dict[str, str]:
+        """Получить заголовки для запросов"""
+        return {
+            'accept': "application/json",
+            'Authorization': f"Bearer {self.token}",
+            'Content-Type': "application/json"
+        }
 
+    async def get_inbounds(self) -> List[Dict[str, Any]]:
+        """
+        Получить список всех inbound'ов
 
-def get_client_link(remark: str, uuid_str: str, user_id: int) -> str:
-    """Генерирует ссылку по шаблону"""
-    template = LINK_TEMPLATES.get(remark)
-    if not template:
-        return f"❌ Нет шаблона для {remark}"
-    remark_suffix = f"{remark}-user_{user_id}_{remark.replace(' ', '_')}"
-    link = template.format(uuid=uuid_str, remark_suffix=urllib.parse.quote(remark_suffix))
-    return link
+        Returns:
+            Список inbound'ов
+        """
+        url = urljoin(self.panel_url + "/", "panel/api/inbounds/list")
+        response = await self.client.get(url, headers=await self._get_headers())
 
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                return data.get("obj", [])
+        return []
 
-async def create_or_update_subscription(user_id: int, days: int, ignore_trial_flag: bool = False) -> Dict[str, str]:
-    """
-    Создаёт или обновляет клиентов во всех inbound-ах.
-    Возвращает словарь {remark: ссылка}
-    """
-    base_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"user_{user_id}"))
-    new_expiry = int((time.time() + days * 86400) * 1000)  # миллисекунды
+    async def get_groups(self) -> List[Dict[str, Any]]:
+        """
+        Получить список всех групп
 
-    user = get_user(user_id)
-    current_end = user.get('subscription_end', 0) if user else 0
-    if current_end > int(time.time() * 1000):
-        new_expiry = current_end + days * 86400 * 1000
+        Returns:
+            Список групп
+        """
+        url = urljoin(self.panel_url + "/", "panel/api/clients/groups")
+        response = await self.client.get(url, headers=await self._get_headers())
 
-    await refresh_inbounds_cache()
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                return data.get("obj", [])
+        return []
 
-    links = {}
-    for remark in INBOUND_REMARKS:
-        inbound_id = await get_inbound_id_by_remark(remark)
-        if not inbound_id:
-            links[remark] = f"❌ Inbound '{remark}' не найден"
-            continue
+    async def create_client(self, email: str, group_name: str, expire_days: int) -> Dict[str, Any]:
+        """
+        Создать клиента с привязкой к группе
 
-        email = f"user_{user_id}_{remark.replace(' ', '_')}"
-        try:
-            await create_or_update_client_in_inbound(inbound_id, email, base_uuid, new_expiry)
-            link = get_client_link(remark, base_uuid, user_id)
-            links[remark] = link if link else "⚠️ Ссылка не сгенерирована"
-        except Exception as e:
-            logging.error(f"Ошибка обработки inbound {remark}: {e}")
-            links[remark] = f"❌ Ошибка: {str(e)}"
+        Args:
+            email: Email клиента (обычно telegram_id)
+            group_name: Название группы (Trial, Monthly, Quarterly)
+            expire_days: Срок действия в днях
 
-    update_subscription_end(user_id, new_expiry)
-    return links
+        Returns:
+            Ответ от API
+        """
+        # Получаем список inbound'ов
+        inbounds = await self.get_inbounds()
+        inbound_ids = [inbound['id'] for inbound in inbounds]
+        # Вычисляем время истечения в МИЛЛИСЕКУНДАХ (как в примере API)
+        import time
+        expire_time_ms = int((time.time() + expire_days * 86400) * 1000) if expire_days > 0 else 0
+
+        # Данные для создания клиента
+        client_data = {
+            "client": {
+                "email": email,  # используем переданный email
+                "totalGB": 0,  # 0 = безлимит
+                "expiryTime": expire_time_ms,
+                "tgid": 0,  # обратите внимание: tgid (маленькая буква)
+                "limitIp": 0,
+                "enable": True,
+                "flow": "xtls-rprx-vision",  # Устанавливаем flow при создании
+                "group": "users"  # Группа по умолчанию
+            },
+            "inboundIds": inbound_ids
+        }
+
+        print(f"Отправляем данные: {json.dumps(client_data, indent=2)}")
+
+        # Отправляем запрос на создание клиента
+        url = urljoin(self.panel_url + "/", "panel/api/clients/add")
+        response = await self.client.post(
+            url,
+            json=client_data,
+            headers=await self._get_headers())
+
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "success": False,
+            "error": f"HTTP {response.status_code}",
+            "response": response.text
+        }
+
+    async def update_client(self, email: str, **kwargs) -> Dict[str, Any]:
+        """
+        Обновить данные клиента (полная замена)
+
+        Args:
+            email: Email клиента
+            **kwargs: Поля для обновления (group, expiryTime, enable, flow и т.д.)
+
+        Returns:
+            Ответ от API
+        """
+        # 1. Получаем текущие данные клиента
+        client_data = await self.get_client_by_email(email)
+        if not client_data:
+            return {"success": False, "error": "Клиент не найден"}
+
+        client = client_data.get("client", {})
+
+        # 2. Обновляем только переданные поля
+        for key, value in kwargs.items():
+            client[key] = value
+        # 3. Убираем поля, которые не нужно отправлять на обновление
+        # Они есть в ответе, но не нужны для update
+        fields_to_remove = ['id', 'createdAt', 'updatedAt', 'reset', 'comment', 'auth', 'password']
+        for field in fields_to_remove:
+            client.pop(field, None)
+
+        # 4. Отправляем полный набор данных
+        url = urljoin(self.panel_url + "/", f"panel/api/clients/update/{email}")
+        response = await self.client.post(
+            url,
+            json=client,  # отправляем весь объект client
+            headers=await self._get_headers()
+        )
+
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "success": False,
+            "error": f"HTTP {response.status_code}",
+            "response": response.text
+        }
+
+    async def get_client_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """
+        Получить клиента по email
+
+        Args:
+            email: Email клиента
+
+        Returns:
+            Данные клиента или None
+        """
+        url = urljoin(self.panel_url + "/", f"panel/api/clients/get/{email}")
+        response = await self.client.get(url, headers=await self._get_headers())
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("success"):
+                return data.get("obj")
+        return None
+
+    async def get_subscription_url(self, email: str) -> Optional[str]:
+        """
+        Получить ссылку на подписку для клиента
+
+        Формат: {SUB_URL}/{sub_path}/{sub_uuid}/
+
+        Args:
+            email: Email клиента
+
+        Returns:
+            Ссылка на подписку или None
+        """
+        client_data = await self.get_client_by_email(email)
+        client = client_data.get("client")
+        if client:
+            # Пробуем получить subId, если нет - берем uuid
+            sub_uuid = client.get('subId')
+            if sub_uuid:
+                return f"{self.sub_url}/{self.sub_path}/{sub_uuid}"
+        return None
+
+    async def get_client_links(self, email: str) -> Optional[List[str]]:
+        """
+        Получить все ссылки клиента (для отладки)
+
+        Args:
+            email: Email клиента
+
+        Returns:
+            Список ссылок или None
+        """
+        sub_url = await self.get_subscription_url(email)
+        if sub_url:
+            response = await self.client.get(sub_url, headers=await self._get_headers())
+            if response.status_code == 200:
+                try:
+                    # Пробуем декодировать base64
+                    decoded = base64.b64decode(response.text).decode('utf-8')
+                    return decoded.strip().split('\n')
+                except:
+                    # Если не base64, возвращаем как есть
+                    return [response.text]
+        return None
+
+    async def delete_client(self, email: str) -> Dict[str, Any]:
+        """
+        Удалить клиента по email
+
+        Args:
+            email: Email клиента
+
+        Returns:
+            Ответ от API
+        """
+        url = urljoin(self.panel_url + "/", f"panel/api/clients/del/{email}")
+        response = await self.client.post(url, headers=await self._get_headers())
+
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "success": False,
+            "error": f"HTTP {response.status_code}",
+            "response": response.text
+        }
+
+    async def get_all_clients(self) -> List[Dict[str, Any]]:
+        """
+        Получить всех клиентов
+
+        Returns:
+            Список всех клиентов
+        """
+        url = urljoin(self.panel_url + "/", "panel/api/clients/list")
+        response = await self.client.get(url, headers=await self._get_headers())
+        print(response)
+        if response.status_code == 200:
+            data = response.json()
+            # print(data)
+            if data.get("success"):
+                return data.get("obj", [])
+        return []
+
+    async def close(self):
+        """Закрыть HTTP-клиент"""
+        await self.client.aclose()
