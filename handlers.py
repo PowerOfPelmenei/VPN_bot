@@ -309,7 +309,7 @@ async def process_tariff(callback: CallbackQuery):
     payment_id = add_payment_and_get_id(user_id, tariff_key, tariff["price"])
 
     if tariff["price"] == 0:
-        # Бесплатный тариф (trial)
+        # Бесплатный тариф (trial) — без изменений
         await callback.message.edit_text(
             f"🎁 <b>Активация пробного периода</b>\n\n"
             f"Вы выбрали: {tariff['name']}\n"
@@ -356,7 +356,7 @@ async def process_tariff(callback: CallbackQuery):
 
     renewal_text = " (продление)" if is_renewal else ""
 
-    # Создаем клавиатуру с кнопками "Оплатить" и "Назад"
+    # Создаем клавиатуру с кнопкой "Оплатить"
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
     payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -374,13 +374,13 @@ async def process_tariff(callback: CallbackQuery):
         ]
     ])
 
-    # Отправляем одно сообщение с информацией и кнопками
+    # ОДНО сообщение с информацией и кнопкой "Оплатить"
     await callback.message.edit_text(
         f"💎 <b>Оплата подписки{renewal_text}</b>\n\n"
         f"Тариф: {tariff['name']}\n"
         f"Срок: {tariff['days']} дней\n"
         f"Цена: {tariff['price']} ⭐ Stars\n\n"
-        f"Нажмите кнопку <b>Оплатить</b> для подтверждения платежа.",
+        f"Нажмите кнопку <b>Оплатить</b> для завершения платежа.",
         parse_mode="HTML",
         reply_markup=payment_keyboard
     )
@@ -408,17 +408,19 @@ async def process_payment(callback: CallbackQuery):
         await callback.answer("❌ Неизвестный тариф", show_alert=True)
         return
 
-    # Убираем клавиатуру, чтобы пользователь не нажал повторно
+    # Обновляем сообщение — показываем, что ожидаем оплату
+    # Убираем кнопку "Оплатить", оставляем только "Назад"
     await callback.message.edit_text(
-        f"⏳ <b>Обработка платежа...</b>\n\n"
+        f"⏳ <b>Ожидание оплаты</b>\n\n"
         f"Тариф: {tariff['name']}\n"
         f"Сумма: {tariff['price']} ⭐ Stars\n\n"
-        f"Пожалуйста, подождите...",
-        parse_mode="HTML"
+        f"Нажмите на кнопку <b>Оплатить</b> в сообщении ниже.",
+        parse_mode="HTML",
+        reply_markup=get_back_keyboard()
     )
 
     try:
-        # Отправляем инвойс
+        # Отправляем инвойс отдельным сообщением
         await callback.bot.send_invoice(
             chat_id=user_id,
             title=f"VPN {tariff['name']}",
@@ -426,17 +428,14 @@ async def process_payment(callback: CallbackQuery):
             payload=f"payment_{payment_id}",
             currency="XTR",
             prices=[{"label": tariff['name'], "amount": tariff['price']}],
-            provider_token=""
-        )
-
-        # После отправки инвойса, обновляем сообщение
-        await callback.message.edit_text(
-            f"💎 <b>Оплата подписки</b>\n\n"
-            f"Тариф: {tariff['name']}\n"
-            f"Сумма: {tariff['price']} ⭐ Stars\n\n"
-            f"📩 Нажмите на кнопку <b>Оплатить</b> в сообщении выше для завершения платежа.",
-            parse_mode="HTML",
-            reply_markup=get_back_keyboard()
+            provider_token="",
+            # Добавляем параметры для лучшего отображения
+            start_parameter="vpn_subscription",
+            need_name=False,
+            need_phone_number=False,
+            need_email=False,
+            need_shipping_address=False,
+            is_flexible=False
         )
     except Exception as e:
         print(f"Ошибка создания инвойса: {e}")
@@ -448,7 +447,6 @@ async def process_payment(callback: CallbackQuery):
             reply_markup=get_main_keyboard()
         )
     await callback.answer()
-
 
 @router.callback_query(F.data == "refresh")
 async def cmd_refresh(callback: CallbackQuery):
