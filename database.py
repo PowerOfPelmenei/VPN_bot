@@ -122,9 +122,7 @@ def add_payment_and_get_id(telegram_id: int, tariff: str, amount: int) -> int:
         )
         session.add(payment)
         session.commit()
-        session.refresh(payment)  # Обновляем объект, чтобы получить ID
         payment_id = payment.id
-        session.expunge(payment)  # Отсоединяем от сессии
         return payment_id
     finally:
         session.close()
@@ -142,7 +140,14 @@ def get_payment_by_id(payment_id: int):
     finally:
         session.close()
 
-def update_payment_status(payment_id: int, status: str):
+
+def update_payment_status(payment_id: int, status: str) -> Optional[Dict[str, Any]]:
+    """
+    Обновить статус платежа и вернуть данные в виде словаря
+
+    Returns:
+        Словарь с данными платежа или None
+    """
     session = SessionLocal()
     try:
         payment = session.query(Payment).filter_by(id=payment_id).first()
@@ -151,7 +156,19 @@ def update_payment_status(payment_id: int, status: str):
             if status == "success":
                 payment.completed_at = datetime.now()
             session.commit()
-            return payment
+
+            # Возвращаем данные в виде словаря ДО закрытия сессии
+            result = {
+                "id": payment.id,
+                "telegram_id": payment.telegram_id,
+                "tariff": payment.tariff,
+                "amount": payment.amount,
+                "status": payment.status,
+                "created_at": payment.created_at,
+                "completed_at": payment.completed_at
+            }
+            return result
+        return None
     finally:
         session.close()
 
