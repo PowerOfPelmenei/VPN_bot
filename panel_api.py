@@ -88,7 +88,8 @@ class AsyncPanelAPI:
         """
         # Получаем список inbound'ов
         inbounds = await self.get_inbounds()
-        inbound_ids = [inbound['id'] for inbound in inbounds]
+        # inbound_ids = [inbound['id'] for inbound in inbounds]
+        inbound_ids = [23, 24, 25, 26, 27, 29]
         # Вычисляем время истечения в МИЛЛИСЕКУНДАХ (как в примере API)
         import time
         expire_time_ms = int((time.time() + expire_days * 86400) * 1000) if expire_days > 0 else 0
