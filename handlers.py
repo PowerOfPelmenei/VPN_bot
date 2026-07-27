@@ -61,32 +61,25 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
         email = f"user_{user_id}"
         print(f"🔄 Активация подписки для {email}, тариф: {tariff['name']}")
 
-        # Проверяем, существует ли клиент
         client_data = await panel_api.get_client_by_email(email)
         print(f"   Клиент в панели: {'найден' if client_data else 'не найден'}")
 
         if client_data:
             client = client_data.get("client", {})
-
-            # Получаем текущее время истечения
             current_expiry = client.get("expiryTime", 0)
             current_time_ms = int(datetime.now().timestamp() * 1000)
 
             print(f"   Текущий срок: {current_expiry}, текущее время: {current_time_ms}")
 
-            # Если срок еще не истек, добавляем дни к текущему сроку
             if current_expiry > current_time_ms:
-                # Добавляем дни к существующему сроку
                 new_expiry = current_expiry + (tariff["days"] * 24 * 60 * 60 * 1000)
                 print(f"   Продление: новый срок {new_expiry}")
             else:
-                # Если срок истек, устанавливаем новый срок от текущего момента
                 new_expiry = int((datetime.now() + timedelta(days=tariff["days"])).timestamp() * 1000)
                 print(f"   Новая подписка: срок {new_expiry}")
 
-            # Обновляем клиента
+            # ❌ УБИРАЕМ email из update_data, так как передаём его отдельно
             update_data = {
-                "email": email,
                 "group": tariff["group"],
                 "expiryTime": new_expiry,
                 "enable": True,
@@ -97,14 +90,13 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
             }
 
             print(f"   Отправляем update: {update_data}")
-            result = await panel_api.update_client(email, **update_data)
+            result = await panel_api.update_client(email, **update_data)  # email передаётся отдельно
             print(f"   Результат update: {result}")
 
             if not result.get("success"):
                 print(f"❌ Ошибка обновления клиента: {result}")
                 return False
         else:
-            # Создаем нового клиента
             print(f"   Создаем нового клиента")
             result = await panel_api.create_client(
                 email=email,
