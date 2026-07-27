@@ -544,26 +544,33 @@ async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
 
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
-    """Обработка успешной оплаты"""
+    """Обработка успешной оплаты (упрощенная версия для отладки)"""
     user_id = message.from_user.id
     payment_info = message.successful_payment
 
-    print(f"✅ Получен успешный платеж от {user_id}")
-    print(f"   Данные платежа: {payment_info}")
+    print("=" * 60)
+    print("✅ ПОЛУЧЕН ПЛАТЕЖ!")
+    print(f"   User ID: {user_id}")
+    print(f"   Payload: {payment_info.invoice_payload}")
+    print("=" * 60)
 
-    # Извлекаем ID платежа из payload
-    payload = payment_info.invoice_payload
-    payment_id = int(payload.replace("payment_", ""))
-    print(f"   ID платежа из payload: {payment_id}")
+    # Извлекаем ID платежа
+    try:
+        payment_id = int(payment_info.invoice_payload.replace("payment_", ""))
+        print(f"   Payment ID: {payment_id}")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        await message.answer("❌ Ошибка платежа")
+        return
 
     # Обновляем статус платежа
     payment = update_payment_status(payment_id, "success")
     if not payment:
-        print(f"❌ Платеж с ID {payment_id} не найден в БД")
-        await message.answer("❌ Ошибка обработки платежа: платеж не найден")
+        print("❌ Платеж не найден в БД")
+        await message.answer("❌ Платеж не найден")
         return
 
-    print(f"   Платеж найден: тариф={payment.tariff}")
+    print(f"   Тариф из БД: {payment.tariff}")
 
     # Находим тариф
     tariff_key = payment.tariff
@@ -573,39 +580,89 @@ async def successful_payment_handler(message: Message):
         await message.answer("❌ Неизвестный тариф")
         return
 
-    print(f"   Тариф: {tariff['name']}, дней: {tariff['days']}, группа: {tariff['group']}")
-
-    # Отправляем сообщение о начале активации
-    await message.answer(
-        f"✅ <b>Оплата получена!</b>\n\n"
-        f"Активируем подписку...",
-        parse_mode="HTML"
-    )
+    print(f"   Тариф: {tariff['name']}, дней: {tariff['days']}")
 
     # Активируем подписку
+    print("🔄 Вызываем activate_subscription...")
     success = await activate_subscription(user_id, tariff_key, tariff)
+    print(f"🔄 Результат: {success}")
 
     if success:
-        print(f"✅ Подписка активирована для {user_id}")
-        # Получаем ссылку
         sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
-
         await message.answer(
-            f"✅ <b>Подписка активирована!</b>\n\n"
+            f"✅ Подписка активирована!\n\n"
             f"Тариф: {tariff['name']}\n"
             f"Срок: {tariff['days']} дней\n\n"
-            f"🔗 <b>Ваша ссылка:</b>\n"
-            f"<code>{sub_url}</code>\n\n"
-            f"📱 Импортируйте ссылку в приложение",
-            parse_mode="HTML",
+            f"🔗 {sub_url}",
             reply_markup=get_main_keyboard()
         )
     else:
-        print(f"❌ Ошибка активации подписки для {user_id}")
-        await message.answer(
-            "❌ <b>Ошибка активации подписки</b>\n\n"
-            "Платеж получен, но не удалось активировать подписку.\n"
-            "Обратитесь в поддержку: @support",
-            parse_mode="HTML",
-            reply_markup=get_main_keyboard()
-        )
+        await message.answer("❌ Ошибка активации подписки")
+
+# @router.message(F.successful_payment)
+# async def successful_payment_handler(message: Message):
+#     """Обработка успешной оплаты"""
+#     user_id = message.from_user.id
+#     payment_info = message.successful_payment
+#
+#     print(f"✅ Получен успешный платеж от {user_id}")
+#     print(f"   Данные платежа: {payment_info}")
+#
+#     # Извлекаем ID платежа из payload
+#     payload = payment_info.invoice_payload
+#     payment_id = int(payload.replace("payment_", ""))
+#     print(f"   ID платежа из payload: {payment_id}")
+#
+#     # Обновляем статус платежа
+#     payment = update_payment_status(payment_id, "success")
+#     if not payment:
+#         print(f"❌ Платеж с ID {payment_id} не найден в БД")
+#         await message.answer("❌ Ошибка обработки платежа: платеж не найден")
+#         return
+#
+#     print(f"   Платеж найден: тариф={payment.tariff}")
+#
+#     # Находим тариф
+#     tariff_key = payment.tariff
+#     tariff = config.TARIFFS.get(tariff_key)
+#     if not tariff:
+#         print(f"❌ Неизвестный тариф: {tariff_key}")
+#         await message.answer("❌ Неизвестный тариф")
+#         return
+#
+#     print(f"   Тариф: {tariff['name']}, дней: {tariff['days']}, группа: {tariff['group']}")
+#
+#     # Отправляем сообщение о начале активации
+#     await message.answer(
+#         f"✅ <b>Оплата получена!</b>\n\n"
+#         f"Активируем подписку...",
+#         parse_mode="HTML"
+#     )
+#
+#     # Активируем подписку
+#     success = await activate_subscription(user_id, tariff_key, tariff)
+#
+#     if success:
+#         print(f"✅ Подписка активирована для {user_id}")
+#         # Получаем ссылку
+#         sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
+#
+#         await message.answer(
+#             f"✅ <b>Подписка активирована!</b>\n\n"
+#             f"Тариф: {tariff['name']}\n"
+#             f"Срок: {tariff['days']} дней\n\n"
+#             f"🔗 <b>Ваша ссылка:</b>\n"
+#             f"<code>{sub_url}</code>\n\n"
+#             f"📱 Импортируйте ссылку в приложение",
+#             parse_mode="HTML",
+#             reply_markup=get_main_keyboard()
+#         )
+#     else:
+#         print(f"❌ Ошибка активации подписки для {user_id}")
+#         await message.answer(
+#             "❌ <b>Ошибка активации подписки</b>\n\n"
+#             "Платеж получен, но не удалось активировать подписку.\n"
+#             "Обратитесь в поддержку: @support",
+#             parse_mode="HTML",
+#             reply_markup=get_main_keyboard()
+#         )
