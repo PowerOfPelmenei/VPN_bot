@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
+from typing import Optional, Dict, Any  # <-- ДОБАВИТЬ ЭТУ СТРОКУ
 import config
 
 Base = declarative_base()
@@ -14,12 +15,12 @@ class User(Base):
 
     id = Column(Integer, primary_key=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
-    email = Column(String, unique=True, nullable=False)  # user_{telegram_id}
+    email = Column(String, unique=True, nullable=False)
     subscription_active = Column(Boolean, default=False)
     subscription_end = Column(DateTime, nullable=True)
-    tariff = Column(String, nullable=True)  # trial, monthly, quarterly
-    group_name = Column(String, default="users")  # текущая группа в панели
-    sub_id = Column(String, nullable=True)  # subId из панели
+    tariff = Column(String, nullable=True)
+    group_name = Column(String, default="users")
+    sub_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -31,7 +32,7 @@ class Payment(Base):
     telegram_id = Column(BigInteger, nullable=False)
     tariff = Column(String, nullable=False)
     amount = Column(Integer, nullable=False)
-    status = Column(String, default="pending")  # pending, success, failed
+    status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.now)
     completed_at = Column(DateTime, nullable=True)
 
@@ -110,6 +111,7 @@ def add_payment(telegram_id: int, tariff: str, amount: int):
     finally:
         session.close()
 
+
 def add_payment_and_get_id(telegram_id: int, tariff: str, amount: int) -> int:
     """Добавить платеж и вернуть его ID"""
     session = SessionLocal()
@@ -124,19 +126,6 @@ def add_payment_and_get_id(telegram_id: int, tariff: str, amount: int) -> int:
         session.commit()
         payment_id = payment.id
         return payment_id
-    finally:
-        session.close()
-
-def get_payment_by_id(payment_id: int):
-    """Получить платеж по ID"""
-    session = SessionLocal()
-    try:
-        payment = session.query(Payment).filter_by(id=payment_id).first()
-        if payment:
-            # Отсоединяем от сессии, чтобы можно было использовать вне
-            session.expunge(payment)
-            return payment
-        return None
     finally:
         session.close()
 
@@ -172,6 +161,7 @@ def update_payment_status(payment_id: int, status: str) -> Optional[Dict[str, An
     finally:
         session.close()
 
+
 def delete_user(telegram_id: int):
     """Удалить пользователя из БД"""
     session = SessionLocal()
@@ -182,5 +172,28 @@ def delete_user(telegram_id: int):
             session.commit()
             return True
         return False
+    finally:
+        session.close()
+
+
+def get_payment_by_id(payment_id: int):
+    """Получить платеж по ID"""
+    session = SessionLocal()
+    try:
+        payment = session.query(Payment).filter_by(id=payment_id).first()
+        if payment:
+            session.expunge(payment)
+            return payment
+        return None
+    finally:
+        session.close()
+
+
+def get_user_payments(telegram_id: int) -> list:
+    """Получить все платежи пользователя"""
+    session = SessionLocal()
+    try:
+        payments = session.query(Payment).filter_by(telegram_id=telegram_id).order_by(Payment.created_at.desc()).all()
+        return payments
     finally:
         session.close()
