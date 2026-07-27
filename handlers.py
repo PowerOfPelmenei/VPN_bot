@@ -59,9 +59,11 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
     """Активация подписки с поддержкой продления (суммирование времени)"""
     try:
         email = f"user_{user_id}"
+        print(f"🔄 Активация подписки для {email}, тариф: {tariff['name']}")
 
         # Проверяем, существует ли клиент
         client_data = await panel_api.get_client_by_email(email)
+        print(f"   Клиент в панели: {'найден' if client_data else 'не найден'}")
 
         if client_data:
             client = client_data.get("client", {})
@@ -70,15 +72,17 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
             current_expiry = client.get("expiryTime", 0)
             current_time_ms = int(datetime.now().timestamp() * 1000)
 
+            print(f"   Текущий срок: {current_expiry}, текущее время: {current_time_ms}")
+
             # Если срок еще не истек, добавляем дни к текущему сроку
             if current_expiry > current_time_ms:
                 # Добавляем дни к существующему сроку
                 new_expiry = current_expiry + (tariff["days"] * 24 * 60 * 60 * 1000)
-                print(f"Продление: текущий срок {current_expiry}, новый срок {new_expiry}")
+                print(f"   Продление: новый срок {new_expiry}")
             else:
                 # Если срок истек, устанавливаем новый срок от текущего момента
                 new_expiry = int((datetime.now() + timedelta(days=tariff["days"])).timestamp() * 1000)
-                print(f"Новая подписка: срок {new_expiry}")
+                print(f"   Новая подписка: срок {new_expiry}")
 
             # Обновляем клиента
             update_data = {
@@ -92,19 +96,25 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
                 "flow": client.get("flow", "xtls-rprx-vision")
             }
 
+            print(f"   Отправляем update: {update_data}")
             result = await panel_api.update_client(email, **update_data)
+            print(f"   Результат update: {result}")
+
             if not result.get("success"):
-                print(f"Ошибка обновления клиента: {result}")
+                print(f"❌ Ошибка обновления клиента: {result}")
                 return False
         else:
             # Создаем нового клиента
+            print(f"   Создаем нового клиента")
             result = await panel_api.create_client(
                 email=email,
                 group_name=tariff["group"],
                 expire_days=tariff["days"]
             )
+            print(f"   Результат create: {result}")
+
             if not result.get("success"):
-                print(f"Ошибка создания клиента: {result}")
+                print(f"❌ Ошибка создания клиента: {result}")
                 return False
 
         # Получаем subId
@@ -113,6 +123,7 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
         if client_data:
             client = client_data.get("client", {})
             sub_id = client.get("subId")
+            print(f"   subId: {sub_id}")
 
         # Обновляем БД
         update_user_subscription(
@@ -122,12 +133,13 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
             tariff["group"],
             sub_id
         )
-
+        print(f"✅ Подписка успешно активирована")
         return True
     except Exception as e:
-        print(f"Ошибка активации подписки: {e}")
+        print(f"❌ Ошибка активации подписки: {e}")
+        import traceback
+        traceback.print_exc()
         return False
-
 
 # --- Обработчики команд ---
 
@@ -536,33 +548,45 @@ async def successful_payment_handler(message: Message):
     user_id = message.from_user.id
     payment_info = message.successful_payment
 
+    print(f"✅ Получен успешный платеж от {user_id}")
+    print(f"   Данные платежа: {payment_info}")
+
     # Извлекаем ID платежа из payload
     payload = payment_info.invoice_payload
     payment_id = int(payload.replace("payment_", ""))
+    print(f"   ID платежа из payload: {payment_id}")
 
     # Обновляем статус платежа
     payment = update_payment_status(payment_id, "success")
     if not payment:
-        await message.answer("❌ Ошибка обработки платежа")
+        print(f"❌ Платеж с ID {payment_id} не найден в БД")
+        await message.answer("❌ Ошибка обработки платежа: платеж не найден")
         return
+
+    print(f"   Платеж найден: тариф={payment.tariff}")
 
     # Находим тариф
     tariff_key = payment.tariff
     tariff = config.TARIFFS.get(tariff_key)
     if not tariff:
+        print(f"❌ Неизвестный тариф: {tariff_key}")
         await message.answer("❌ Неизвестный тариф")
         return
 
-    # Активируем подписку
+    print(f"   Тариф: {tariff['name']}, дней: {tariff['days']}, группа: {tariff['group']}")
+
+    # Отправляем сообщение о начале активации
     await message.answer(
         f"✅ <b>Оплата получена!</b>\n\n"
         f"Активируем подписку...",
         parse_mode="HTML"
     )
 
+    # Активируем подписку
     success = await activate_subscription(user_id, tariff_key, tariff)
 
     if success:
+        print(f"✅ Подписка активирована для {user_id}")
         # Получаем ссылку
         sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
 
@@ -577,6 +601,7 @@ async def successful_payment_handler(message: Message):
             reply_markup=get_main_keyboard()
         )
     else:
+        print(f"❌ Ошибка активации подписки для {user_id}")
         await message.answer(
             "❌ <b>Ошибка активации подписки</b>\n\n"
             "Платеж получен, но не удалось активировать подписку.\n"
