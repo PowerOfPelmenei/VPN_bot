@@ -165,8 +165,8 @@ async def cmd_help(event):
         "💡 <b>Как подключиться:</b>\n"
         "1. Купите подписку\n"
         "2. Получите ссылку\n"
-        "3. Импортируйте в приложение (V2RayNG, Nekoray, Hiddify)\n\n"
-        "❓ Вопросы: @support"
+        "3. Импортируйте в приложение (V2RayNG, V2RayTun, Nekoray, Hiddify)\n\n"
+        "❓ Вопросы: @ddanil21oroch"
     )
 
     if isinstance(event, Message):
@@ -499,6 +499,7 @@ async def cmd_refresh(callback: CallbackQuery):
                 f"<code>{sub_url}</code>\n\n"
                 f"📱 Импортируйте эту ссылку в приложение:\n"
                 f"• V2RayNG\n"
+                f"• V2RayTun\n"
                 f"• Nekoray\n"
                 f"• Hiddify\n"
                 f"• и другие",
