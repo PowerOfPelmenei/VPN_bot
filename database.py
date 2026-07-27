@@ -123,3 +123,16 @@ def update_payment_status(payment_id: int, status: str):
             return payment
     finally:
         session.close()
+
+def delete_user(telegram_id: int):
+    """Удалить пользователя из БД"""
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter_by(telegram_id=telegram_id).first()
+        if user:
+            session.delete(user)
+            session.commit()
+            return True
+        return False
+    finally:
+        session.close()

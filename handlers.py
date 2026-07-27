@@ -1,13 +1,14 @@
 import asyncio
 from datetime import datetime, timedelta
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, PreCheckoutQuery
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 
 from database import (
     get_user, create_user, update_user_subscription,
-    deactivate_subscription, add_payment, update_payment_status
+    deactivate_subscription, add_payment, update_payment_status,
+    delete_user
 )
 from panel_api import AsyncPanelAPI
 from keyboards import (
@@ -18,7 +19,7 @@ import config
 
 router = Router()
 
-# Инициализируем API панели (будет создан при старте бота)
+# Инициализируем API панели
 panel_api: AsyncPanelAPI = None
 
 
@@ -43,53 +44,63 @@ def format_date(timestamp_ms: int) -> str:
     return dt.strftime("%d.%m.%Y %H:%M")
 
 
+async def get_client_or_none(email: str):
+    """Получить клиента из панели или None"""
+    try:
+        client_data = await panel_api.get_client_by_email(email)
+        if client_data:
+            return client_data.get("client", {})
+    except Exception as e:
+        print(f"Ошибка получения клиента: {e}")
+    return None
+
+
 async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> bool:
-    """Активация подписки (общая логика)"""
+    """Активация подписки (создает клиента только если его нет)"""
     try:
         email = f"user_{user_id}"
 
-        # Проверяем, существует ли клиент в панели
+        # Проверяем, существует ли клиент
         client_data = await panel_api.get_client_by_email(email)
 
         if client_data:
-            # Клиент существует - обновляем
+            client = client_data.get("client", {})
+            # Обновляем существующего
             expire_time_ms = int((datetime.now() + timedelta(days=tariff["days"])).timestamp() * 1000)
 
-            result = await panel_api.update_client(
-                email,
-                group=tariff["group"],
-                expiryTime=expire_time_ms,
-                enable=True
-            )
+            # Сохраняем все поля
+            update_data = {
+                "email": email,
+                "group": tariff["group"],
+                "expiryTime": expire_time_ms,
+                "enable": True,
+                "totalGB": client.get("totalGB", 0),
+                "tgid": client.get("tgid", 0),
+                "limitIp": client.get("limitIp", 0),
+                "flow": client.get("flow", "xtls-rprx-vision")
+            }
 
+            result = await panel_api.update_client(email, **update_data)
             if not result.get("success"):
+                print(f"Ошибка обновления клиента: {result}")
                 return False
-
-            # Получаем subId
-            client_data = await panel_api.get_client_by_email(email)
-            if client_data:
-                client = client_data.get("client", {})
-                sub_id = client.get("subId")
-            else:
-                sub_id = None
         else:
-            # Клиент НЕ существует - создаем нового
+            # Создаем нового клиента
             result = await panel_api.create_client(
                 email=email,
                 group_name=tariff["group"],
                 expire_days=tariff["days"]
             )
-
             if not result.get("success"):
+                print(f"Ошибка создания клиента: {result}")
                 return False
 
-            # Получаем subId у нового клиента
-            client_data = await panel_api.get_client_by_email(email)
-            if client_data:
-                client = client_data.get("client", {})
-                sub_id = client.get("subId")
-            else:
-                sub_id = None
+        # Получаем subId
+        client_data = await panel_api.get_client_by_email(email)
+        sub_id = None
+        if client_data:
+            client = client_data.get("client", {})
+            sub_id = client.get("subId")
 
         # Обновляем БД
         update_user_subscription(
@@ -105,17 +116,17 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
         print(f"Ошибка активации подписки: {e}")
         return False
 
+
 # --- Обработчики команд ---
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
 
-    # Получаем или создаем пользователя ТОЛЬКО в БД
+    # Только БД, без создания клиента
     user = get_user(user_id)
     if not user:
         user = create_user(user_id)
-        # ❌ Убираем создание клиента в панели здесь
 
     await message.answer(
         f"👋 Привет, {message.from_user.full_name}!\n\n"
@@ -166,25 +177,32 @@ async def cmd_status(event):
         return
 
     # Проверяем, есть ли клиент в панели
-    client_data = None
-    if panel_api:
-        try:
-            client_data = await panel_api.get_client_by_email(f"user_{user_id}")
-        except Exception as e:
-            print(f"Ошибка получения данных из панели: {e}")
+    client = await get_client_or_none(f"user_{user_id}")
 
-    if not client_data:
-        # Клиент еще не создан
-        await event.message.edit_text(
-            "📊 <b>Ваш статус подписки</b>\n\n"
-            "❌ <b>Нет активной подписки</b>\n\n"
-            "💡 Чтобы получить доступ, выберите тариф в разделе /buy",
-            parse_mode="HTML",
-            reply_markup=get_main_keyboard()
-        )
+    if not client:
+        # Клиент не найден — обновляем БД
+        if user.subscription_active:
+            deactivate_subscription(user_id)
+
+        # Если это не сообщение, редактируем
+        if isinstance(event, CallbackQuery):
+            await event.message.edit_text(
+                "📊 <b>Ваш статус подписки</b>\n\n"
+                "❌ <b>Нет активной подписки</b>\n\n"
+                "💡 Чтобы получить доступ, выберите тариф в разделе /buy",
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await event.answer(
+                "📊 Ваш статус подписки\n\n"
+                "❌ Нет активной подписки\n\n"
+                "💡 Чтобы получить доступ, выберите тариф в разделе /buy",
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard()
+            )
         return
 
-    client = client_data.get("client", {})
     expiry_time = client.get("expiryTime", 0)
     is_enable = client.get("enable", False)
     group = client.get("group", "users")
@@ -192,7 +210,7 @@ async def cmd_status(event):
     # Проверяем, активна ли подписка
     if expiry_time > 0 and expiry_time < datetime.now().timestamp() * 1000:
         is_enable = False
-        await deactivate_subscription(user_id)
+        deactivate_subscription(user_id)
 
     status_text = "✅ <b>Активна</b>" if is_enable else "❌ <b>Не активна</b>"
     expiry_text = format_date(expiry_time) if expiry_time > 0 else "Не установлена"
@@ -204,15 +222,27 @@ async def cmd_status(event):
         if sub_url:
             link_text = f"\n\n🔗 <b>Ссылка для подключения:</b>\n<code>{sub_url}</code>"
 
-    await event.message.edit_text(
-        f"📊 <b>Ваш статус подписки</b>\n\n"
-        f"Статус: {status_text}\n"
-        f"Группа: {group}\n"
-        f"Истекает: {expiry_text}\n"
-        f"{link_text}",
-        parse_mode="HTML",
-        reply_markup=get_subscription_info_keyboard() if is_enable else get_main_keyboard()
-    )
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(
+            f"📊 <b>Ваш статус подписки</b>\n\n"
+            f"Статус: {status_text}\n"
+            f"Группа: {group}\n"
+            f"Истекает: {expiry_text}\n"
+            f"{link_text}",
+            parse_mode="HTML",
+            reply_markup=get_subscription_info_keyboard() if is_enable else get_main_keyboard()
+        )
+    else:
+        await event.answer(
+            f"📊 Ваш статус подписки\n\n"
+            f"Статус: {status_text}\n"
+            f"Группа: {group}\n"
+            f"Истекает: {expiry_text}\n"
+            f"{link_text}",
+            parse_mode="HTML",
+            reply_markup=get_subscription_info_keyboard() if is_enable else get_main_keyboard()
+        )
+
 
 @router.message(Command("buy"))
 @router.callback_query(F.data == "buy")
@@ -267,10 +297,25 @@ async def process_tariff(callback: CallbackQuery):
 
     # Проверяем, есть ли уже активная подписка
     user = get_user(user_id)
-    if user and user.subscription_active:
-        # Если тариф бесплатный, не даем продлить
-        if tariff["price"] == 0:
-            await callback.answer("❌ У вас уже есть активная подписка", show_alert=True)
+
+    # Проверяем реальный статус в панели
+    client = await get_client_or_none(f"user_{user_id}")
+
+    if client:
+        expiry_time = client.get("expiryTime", 0)
+        is_enable = client.get("enable", False)
+
+        # Если клиент активен и срок не истек
+        if is_enable and (expiry_time == 0 or expiry_time > datetime.now().timestamp() * 1000):
+            # Если тариф бесплатный, не даем продлить
+            if tariff["price"] == 0:
+                await callback.answer("❌ У вас уже есть активная подписка", show_alert=True)
+                return
+
+            # Для платных тарифов предлагаем продлить
+            # (можно добавить логику продления позже)
+            await callback.answer("✅ У вас уже есть активная подписка. Продление будет доступно позже.",
+                                  show_alert=True)
             return
 
     # Создаем платеж
@@ -330,10 +375,9 @@ async def process_tariff(callback: CallbackQuery):
                 title=f"VPN {tariff['name']}",
                 description=f"Подписка на {tariff['days']} дней",
                 payload=f"payment_{payment.id}",
-                currency="XTR",  # Telegram Stars
+                currency="XTR",
                 prices=[{"label": tariff['name'], "amount": tariff['price']}],
-                provider_token="",  # Для Stars не нужен
-                start_parameter="vpn_bot"
+                provider_token=""
             )
 
             await callback.message.edit_text(
@@ -347,8 +391,9 @@ async def process_tariff(callback: CallbackQuery):
         except Exception as e:
             print(f"Ошибка создания инвойса: {e}")
             await callback.message.edit_text(
-                "❌ <b>Ошибка создания платежа</b>\n\n"
-                "Попробуйте позже.",
+                f"❌ <b>Ошибка создания платежа</b>\n\n"
+                f"Текст ошибки: {str(e)}\n\n"
+                f"Попробуйте позже или выберите другой тариф.",
                 parse_mode="HTML",
                 reply_markup=get_main_keyboard()
             )
@@ -361,6 +406,36 @@ async def cmd_refresh(callback: CallbackQuery):
 
     if not panel_api:
         await callback.answer("⏳ Сервис временно недоступен", show_alert=True)
+        return
+
+    # Проверяем, есть ли клиент
+    client = await get_client_or_none(f"user_{user_id}")
+
+    if not client:
+        await callback.message.edit_text(
+            "❌ <b>У вас нет активной подписки</b>\n\n"
+            "Клиент не найден в системе.\n"
+            "Купите подписку в разделе /buy",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+        await callback.answer()
+        return
+
+    is_enable = client.get("enable", False)
+    expiry_time = client.get("expiryTime", 0)
+
+    # Проверяем, активна ли подписка
+    if not is_enable or (expiry_time > 0 and expiry_time < datetime.now().timestamp() * 1000):
+        deactivate_subscription(user_id)
+        await callback.message.edit_text(
+            "❌ <b>Ваша подписка не активна</b>\n\n"
+            "Срок действия истек или подписка отключена.\n"
+            "Купите новую подписку в разделе /buy",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+        await callback.answer()
         return
 
     try:
@@ -378,32 +453,27 @@ async def cmd_refresh(callback: CallbackQuery):
                 reply_markup=get_subscription_info_keyboard()
             )
         else:
-            # Проверяем, есть ли активная подписка
-            user = get_user(user_id)
-            if user and user.subscription_active:
-                await callback.message.edit_text(
-                    "❌ <b>Не удалось получить ссылку</b>\n\n"
-                    "Возможно, клиент еще не создан в панели.\n"
-                    "Попробуйте обновить статус через /status",
-                    parse_mode="HTML",
-                    reply_markup=get_main_keyboard()
-                )
-            else:
-                await callback.message.edit_text(
-                    "❌ <b>У вас нет активной подписки</b>\n\n"
-                    "Купите подписку в разделе /buy",
-                    parse_mode="HTML",
-                    reply_markup=get_main_keyboard()
-                )
+            await callback.message.edit_text(
+                "❌ <b>Не удалось получить ссылку</b>\n\n"
+                "Попробуйте позже или обратитесь в поддержку.",
+                parse_mode="HTML",
+                reply_markup=get_main_keyboard()
+            )
     except Exception as e:
         print(f"Ошибка получения ссылки: {e}")
-        await callback.answer("❌ Ошибка получения ссылки", show_alert=True)
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка получения ссылки</b>\n\n"
+            f"Текст ошибки: {str(e)}",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+    await callback.answer()
 
 
 # --- Обработчики платежей ---
 
 @router.pre_checkout_query()
-async def pre_checkout_query_handler(pre_checkout_query):
+async def pre_checkout_query_handler(pre_checkout_query: PreCheckoutQuery):
     """Обработка предварительного запроса на оплату"""
     await pre_checkout_query.bot.answer_pre_checkout_query(
         pre_checkout_query.id,
