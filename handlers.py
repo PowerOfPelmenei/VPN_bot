@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from database import (
     get_user, create_user, update_user_subscription,
     deactivate_subscription, add_payment, update_payment_status,
-    delete_user, add_payment_and_get_id
+    delete_user, add_payment_and_get_id, get_payment_by_id
 )
 from panel_api import AsyncPanelAPI
 from keyboards import (
@@ -356,52 +356,95 @@ async def process_tariff(callback: CallbackQuery):
 
     renewal_text = " (продление)" if is_renewal else ""
 
-    # Отправляем сообщение без лишних тегов, которые могут вызвать ошибку
-    try:
-        await callback.message.edit_text(
-            f"💎 Оплата подписки{renewal_text}\n\n"
-            f"Тариф: {tariff['name']}\n"
-            f"Срок: {tariff['days']} дней\n"
-            f"Цена: {tariff['price']} ⭐ Stars\n\n"
-            f"Ожидайте подтверждения платежа...",
-            parse_mode=None  # Отключаем HTML, чтобы избежать ошибок парсинга
-        )
-    except Exception as e:
-        # Если не удалось отредактировать, отправляем новое сообщение
-        await callback.message.answer(
-            f"💎 Оплата подписки{renewal_text}\n\n"
-            f"Тариф: {tariff['name']}\n"
-            f"Срок: {tariff['days']} дней\n"
-            f"Цена: {tariff['price']} ⭐ Stars\n\n"
-            f"Ожидайте подтверждения платежа..."
-        )
+    # Создаем клавиатуру с кнопками "Оплатить" и "Назад"
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-    # Отправляем инвойс
+    payment_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=f"💎 Оплатить {tariff['price']} ⭐",
+                callback_data=f"pay_{payment_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔙 Назад",
+                callback_data="back_to_menu"
+            )
+        ]
+    ])
+
+    # Отправляем одно сообщение с информацией и кнопками
+    await callback.message.edit_text(
+        f"💎 <b>Оплата подписки{renewal_text}</b>\n\n"
+        f"Тариф: {tariff['name']}\n"
+        f"Срок: {tariff['days']} дней\n"
+        f"Цена: {tariff['price']} ⭐ Stars\n\n"
+        f"Нажмите кнопку <b>Оплатить</b> для подтверждения платежа.",
+        parse_mode="HTML",
+        reply_markup=payment_keyboard
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pay_"))
+async def process_payment(callback: CallbackQuery):
+    """Обработка нажатия кнопки 'Оплатить'"""
+    payment_id = int(callback.data.replace("pay_", ""))
+    user_id = callback.from_user.id
+
+    # Получаем информацию о платеже
+    from database import get_payment_by_id
+    payment = get_payment_by_id(payment_id)
+
+    if not payment:
+        await callback.answer("❌ Платеж не найден", show_alert=True)
+        return
+
+    # Находим тариф
+    tariff_key = payment.tariff
+    tariff = config.TARIFFS.get(tariff_key)
+    if not tariff:
+        await callback.answer("❌ Неизвестный тариф", show_alert=True)
+        return
+
+    # Убираем клавиатуру, чтобы пользователь не нажал повторно
+    await callback.message.edit_text(
+        f"⏳ <b>Обработка платежа...</b>\n\n"
+        f"Тариф: {tariff['name']}\n"
+        f"Сумма: {tariff['price']} ⭐ Stars\n\n"
+        f"Пожалуйста, подождите...",
+        parse_mode="HTML"
+    )
+
     try:
+        # Отправляем инвойс
         await callback.bot.send_invoice(
             chat_id=user_id,
             title=f"VPN {tariff['name']}",
             description=f"Подписка на {tariff['days']} дней",
-            payload=f"payment_{payment_id}",  # Используем payment_id
+            payload=f"payment_{payment_id}",
             currency="XTR",
             prices=[{"label": tariff['name'], "amount": tariff['price']}],
             provider_token=""
         )
 
-        # Отправляем сообщение об ожидании
-        await callback.message.answer(
-            f"💎 Ожидание оплаты\n\n"
+        # После отправки инвойса, обновляем сообщение
+        await callback.message.edit_text(
+            f"💎 <b>Оплата подписки</b>\n\n"
             f"Тариф: {tariff['name']}\n"
             f"Сумма: {tariff['price']} ⭐ Stars\n\n"
-            f"Нажмите на кнопку Оплатить в сообщении ниже",
+            f"📩 Нажмите на кнопку <b>Оплатить</b> в сообщении выше для завершения платежа.",
+            parse_mode="HTML",
             reply_markup=get_back_keyboard()
         )
     except Exception as e:
         print(f"Ошибка создания инвойса: {e}")
-        await callback.message.answer(
-            f"❌ Ошибка создания платежа\n\n"
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка создания платежа</b>\n\n"
             f"Текст ошибки: {str(e)}\n\n"
             f"Попробуйте позже или выберите другой тариф.",
+            parse_mode="HTML",
             reply_markup=get_main_keyboard()
         )
     await callback.answer()

@@ -128,6 +128,20 @@ def add_payment_and_get_id(telegram_id: int, tariff: str, amount: int) -> int:
         return payment_id
     finally:
         session.close()
+
+def get_payment_by_id(payment_id: int):
+    """Получить платеж по ID"""
+    session = SessionLocal()
+    try:
+        payment = session.query(Payment).filter_by(id=payment_id).first()
+        if payment:
+            # Отсоединяем от сессии, чтобы можно было использовать вне
+            session.expunge(payment)
+            return payment
+        return None
+    finally:
+        session.close()
+
 def update_payment_status(payment_id: int, status: str):
     session = SessionLocal()
     try:
