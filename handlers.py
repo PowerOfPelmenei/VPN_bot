@@ -56,7 +56,7 @@ async def get_client_or_none(email: str):
 
 
 async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> bool:
-    """Активация подписки (создает клиента только если его нет)"""
+    """Активация подписки с поддержкой продления (суммирование времени)"""
     try:
         email = f"user_{user_id}"
 
@@ -65,14 +65,26 @@ async def activate_subscription(user_id: int, tariff_key: str, tariff: dict) -> 
 
         if client_data:
             client = client_data.get("client", {})
-            # Обновляем существующего
-            expire_time_ms = int((datetime.now() + timedelta(days=tariff["days"])).timestamp() * 1000)
 
-            # Сохраняем все поля
+            # Получаем текущее время истечения
+            current_expiry = client.get("expiryTime", 0)
+            current_time_ms = int(datetime.now().timestamp() * 1000)
+
+            # Если срок еще не истек, добавляем дни к текущему сроку
+            if current_expiry > current_time_ms:
+                # Добавляем дни к существующему сроку
+                new_expiry = current_expiry + (tariff["days"] * 24 * 60 * 60 * 1000)
+                print(f"Продление: текущий срок {current_expiry}, новый срок {new_expiry}")
+            else:
+                # Если срок истек, устанавливаем новый срок от текущего момента
+                new_expiry = int((datetime.now() + timedelta(days=tariff["days"])).timestamp() * 1000)
+                print(f"Новая подписка: срок {new_expiry}")
+
+            # Обновляем клиента
             update_data = {
                 "email": email,
                 "group": tariff["group"],
-                "expiryTime": expire_time_ms,
+                "expiryTime": new_expiry,
                 "enable": True,
                 "totalGB": client.get("totalGB", 0),
                 "tgid": client.get("tgid", 0),
@@ -176,36 +188,26 @@ async def cmd_status(event):
             await event.answer("❌ Вы не зарегистрированы", show_alert=True)
         return
 
-    # Проверяем, есть ли клиент в панели
     client = await get_client_or_none(f"user_{user_id}")
 
     if not client:
-        # Клиент не найден — обновляем БД
         if user.subscription_active:
             deactivate_subscription(user_id)
 
-        # Если это не сообщение, редактируем
+        text = (
+            "📊 <b>Ваш статус подписки</b>\n\n"
+            "❌ <b>Нет активной подписки</b>\n\n"
+            "💡 Чтобы получить доступ, выберите тариф в разделе /buy"
+        )
+
         if isinstance(event, CallbackQuery):
-            await event.message.edit_text(
-                "📊 <b>Ваш статус подписки</b>\n\n"
-                "❌ <b>Нет активной подписки</b>\n\n"
-                "💡 Чтобы получить доступ, выберите тариф в разделе /buy",
-                parse_mode="HTML",
-                reply_markup=get_main_keyboard()
-            )
+            await event.message.edit_text(text, parse_mode="HTML", reply_markup=get_main_keyboard())
         else:
-            await event.answer(
-                "📊 Ваш статус подписки\n\n"
-                "❌ Нет активной подписки\n\n"
-                "💡 Чтобы получить доступ, выберите тариф в разделе /buy",
-                parse_mode="HTML",
-                reply_markup=get_main_keyboard()
-            )
+            await event.answer(text, parse_mode="HTML", reply_markup=get_main_keyboard())
         return
 
     expiry_time = client.get("expiryTime", 0)
     is_enable = client.get("enable", False)
-    group = client.get("group", "users")
 
     # Проверяем, активна ли подписка
     if expiry_time > 0 and expiry_time < datetime.now().timestamp() * 1000:
@@ -222,23 +224,22 @@ async def cmd_status(event):
         if sub_url:
             link_text = f"\n\n🔗 <b>Ссылка для подключения:</b>\n<code>{sub_url}</code>"
 
+    text = (
+        f"📊 <b>Ваш статус подписки</b>\n\n"
+        f"Статус: {status_text}\n"
+        f"Истекает: {expiry_text}\n"
+        f"{link_text}"
+    )
+
     if isinstance(event, CallbackQuery):
         await event.message.edit_text(
-            f"📊 <b>Ваш статус подписки</b>\n\n"
-            f"Статус: {status_text}\n"
-            f"Группа: {group}\n"
-            f"Истекает: {expiry_text}\n"
-            f"{link_text}",
+            text,
             parse_mode="HTML",
             reply_markup=get_subscription_info_keyboard() if is_enable else get_main_keyboard()
         )
     else:
         await event.answer(
-            f"📊 Ваш статус подписки\n\n"
-            f"Статус: {status_text}\n"
-            f"Группа: {group}\n"
-            f"Истекает: {expiry_text}\n"
-            f"{link_text}",
+            text,
             parse_mode="HTML",
             reply_markup=get_subscription_info_keyboard() if is_enable else get_main_keyboard()
         )
@@ -294,29 +295,32 @@ async def process_tariff(callback: CallbackQuery):
         return
 
     tariff = config.TARIFFS[tariff_key]
-
-    # Проверяем, есть ли уже активная подписка
     user = get_user(user_id)
 
-    # Проверяем реальный статус в панели
+    # Проверяем, есть ли клиент в панели
     client = await get_client_or_none(f"user_{user_id}")
 
+    # Проверяем, не пытается ли пользователь взять пробный период повторно
+    if tariff["price"] == 0 and client:
+        # Если у пользователя уже есть клиент, не даем trial
+        await callback.answer("❌ Пробный период доступен только один раз", show_alert=True)
+        return
+
+    # Если клиент существует и активен, предлагаем продление
     if client:
         expiry_time = client.get("expiryTime", 0)
         is_enable = client.get("enable", False)
+        current_time_ms = int(datetime.now().timestamp() * 1000)
 
-        # Если клиент активен и срок не истек
-        if is_enable and (expiry_time == 0 or expiry_time > datetime.now().timestamp() * 1000):
-            # Если тариф бесплатный, не даем продлить
+        if is_enable and expiry_time > current_time_ms:
+            # Подписка активна — это продление
             if tariff["price"] == 0:
-                await callback.answer("❌ У вас уже есть активная подписка", show_alert=True)
+                await callback.answer("❌ Пробный период доступен только один раз", show_alert=True)
                 return
 
-            # Для платных тарифов предлагаем продлить
-            # (можно добавить логику продления позже)
-            await callback.answer("✅ У вас уже есть активная подписка. Продление будет доступно позже.",
-                                  show_alert=True)
-            return
+            # Для платных тарифов — разрешаем продление
+            # Просто продолжаем без предупреждения
+            pass
 
     # Создаем платеж
     payment = add_payment(user_id, tariff_key, tariff["price"])
@@ -332,11 +336,9 @@ async def process_tariff(callback: CallbackQuery):
             parse_mode="HTML"
         )
 
-        # Активируем подписку
         success = await activate_subscription(user_id, tariff_key, tariff)
 
         if success:
-            # Получаем ссылку
             sub_url = await panel_api.get_subscription_url(f"user_{user_id}")
 
             await callback.message.edit_text(
@@ -356,47 +358,59 @@ async def process_tariff(callback: CallbackQuery):
                 parse_mode="HTML",
                 reply_markup=get_main_keyboard()
             )
-    else:
-        # Платный тариф
-        await callback.message.edit_text(
-            f"💎 <b>Оплата подписки</b>\n\n"
-            f"Тариф: {tariff['name']}\n"
-            f"Срок: {tariff['days']} дней\n"
-            f"Цена: {tariff['price']} ⭐ Stars\n\n"
-            f"⏳ Ожидайте подтверждения платежа...",
-            parse_mode="HTML"
+        await callback.answer()
+        return
+
+    # --- Платный тариф ---
+    # Проверяем, активна ли уже подписка
+    is_renewal = False
+    if client:
+        expiry_time = client.get("expiryTime", 0)
+        is_enable = client.get("enable", False)
+        current_time_ms = int(datetime.now().timestamp() * 1000)
+        if is_enable and expiry_time > current_time_ms:
+            is_renewal = True
+
+    renewal_text = " (продление)" if is_renewal else ""
+
+    await callback.message.edit_text(
+        f"💎 <b>Оплата подписки{renewal_text}</b>\n\n"
+        f"Тариф: {tariff['name']}\n"
+        f"Срок: {tariff['days']} дней\n"
+        f"Цена: {tariff['price']} ⭐ Stars\n\n"
+        f"⏳ Ожидайте подтверждения платежа...",
+        parse_mode="HTML"
+    )
+
+    try:
+        await callback.bot.send_invoice(
+            chat_id=user_id,
+            title=f"VPN {tariff['name']}",
+            description=f"Подписка на {tariff['days']} дней",
+            payload=f"payment_{payment.id}",
+            currency="XTR",
+            prices=[{"label": tariff['name'], "amount": tariff['price']}],
+            provider_token=""
         )
 
-        # Отправляем запрос на оплату через Telegram Stars
-        try:
-            # Создаем инвойс
-            await callback.bot.send_invoice(
-                chat_id=user_id,
-                title=f"VPN {tariff['name']}",
-                description=f"Подписка на {tariff['days']} дней",
-                payload=f"payment_{payment.id}",
-                currency="XTR",
-                prices=[{"label": tariff['name'], "amount": tariff['price']}],
-                provider_token=""
-            )
-
-            await callback.message.edit_text(
-                f"💎 <b>Ожидание оплаты</b>\n\n"
-                f"Тариф: {tariff['name']}\n"
-                f"Сумма: {tariff['price']} ⭐ Stars\n\n"
-                f"📩 Нажмите на кнопку <b>Оплатить</b> в сообщении ниже",
-                parse_mode="HTML",
-                reply_markup=get_back_keyboard()
-            )
-        except Exception as e:
-            print(f"Ошибка создания инвойса: {e}")
-            await callback.message.edit_text(
-                f"❌ <b>Ошибка создания платежа</b>\n\n"
-                f"Текст ошибки: {str(e)}\n\n"
-                f"Попробуйте позже или выберите другой тариф.",
-                parse_mode="HTML",
-                reply_markup=get_main_keyboard()
-            )
+        await callback.message.edit_text(
+            f"💎 <b>Ожидание оплаты</b>\n\n"
+            f"Тариф: {tariff['name']}\n"
+            f"Сумма: {tariff['price']} ⭐ Stars\n\n"
+            f"📩 Нажмите на кнопку <b>Оплатить</b> в сообщении ниже",
+            parse_mode="HTML",
+            reply_markup=get_back_keyboard()
+        )
+    except Exception as e:
+        print(f"Ошибка создания инвойса: {e}")
+        await callback.message.edit_text(
+            f"❌ <b>Ошибка создания платежа</b>\n\n"
+            f"Текст ошибки: {str(e)}\n\n"
+            f"Попробуйте позже или выберите другой тариф.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard()
+        )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "refresh")

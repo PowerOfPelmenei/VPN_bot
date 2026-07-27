@@ -18,20 +18,20 @@ TARIFFS = {
         "name": "Пробный период",
         "days": 3,
         "price": 0,
-        "group": "users",  # временная группа для trial
+        "group": "Trial",  # ← исправлено: Trial вместо users
         "description": "3 дня бесплатно"
     },
     "monthly": {
         "name": "1 месяц",
         "days": 30,
-        "price": 100,  # цена в Stars
+        "price": 100,
         "group": "Monthly",
         "description": "30 дней доступа"
     },
     "quarterly": {
         "name": "3 месяца",
         "days": 90,
-        "price": 250,  # цена в Stars
+        "price": 250,
         "group": "Quarterly",
         "description": "90 дней доступа"
     }
