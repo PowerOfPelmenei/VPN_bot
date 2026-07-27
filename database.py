@@ -110,7 +110,24 @@ def add_payment(telegram_id: int, tariff: str, amount: int):
     finally:
         session.close()
 
-
+def add_payment_and_get_id(telegram_id: int, tariff: str, amount: int) -> int:
+    """Добавить платеж и вернуть его ID"""
+    session = SessionLocal()
+    try:
+        payment = Payment(
+            telegram_id=telegram_id,
+            tariff=tariff,
+            amount=amount,
+            status="pending"
+        )
+        session.add(payment)
+        session.commit()
+        session.refresh(payment)  # Обновляем объект, чтобы получить ID
+        payment_id = payment.id
+        session.expunge(payment)  # Отсоединяем от сессии
+        return payment_id
+    finally:
+        session.close()
 def update_payment_status(payment_id: int, status: str):
     session = SessionLocal()
     try:

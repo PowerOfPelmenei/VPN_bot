@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from database import (
     get_user, create_user, update_user_subscription,
     deactivate_subscription, add_payment, update_payment_status,
-    delete_user
+    delete_user, add_payment_and_get_id
 )
 from panel_api import AsyncPanelAPI
 from keyboards import (
@@ -302,28 +302,11 @@ async def process_tariff(callback: CallbackQuery):
 
     # Проверяем, не пытается ли пользователь взять пробный период повторно
     if tariff["price"] == 0 and client:
-        # Если у пользователя уже есть клиент, не даем trial
         await callback.answer("❌ Пробный период доступен только один раз", show_alert=True)
         return
 
-    # Если клиент существует и активен, предлагаем продление
-    if client:
-        expiry_time = client.get("expiryTime", 0)
-        is_enable = client.get("enable", False)
-        current_time_ms = int(datetime.now().timestamp() * 1000)
-
-        if is_enable and expiry_time > current_time_ms:
-            # Подписка активна — это продление
-            if tariff["price"] == 0:
-                await callback.answer("❌ Пробный период доступен только один раз", show_alert=True)
-                return
-
-            # Для платных тарифов — разрешаем продление
-            # Просто продолжаем без предупреждения
-            pass
-
-    # Создаем платеж
-    payment = add_payment(user_id, tariff_key, tariff["price"])
+    # Создаем платеж и сразу получаем ID
+    payment_id = add_payment_and_get_id(user_id, tariff_key, tariff["price"])
 
     if tariff["price"] == 0:
         # Бесплатный тариф (trial)
@@ -362,7 +345,7 @@ async def process_tariff(callback: CallbackQuery):
         return
 
     # --- Платный тариф ---
-    # Проверяем, активна ли уже подписка
+    # Проверяем, активна ли уже подписка (для отображения)
     is_renewal = False
     if client:
         expiry_time = client.get("expiryTime", 0)
@@ -373,41 +356,52 @@ async def process_tariff(callback: CallbackQuery):
 
     renewal_text = " (продление)" if is_renewal else ""
 
-    await callback.message.edit_text(
-        f"💎 <b>Оплата подписки{renewal_text}</b>\n\n"
-        f"Тариф: {tariff['name']}\n"
-        f"Срок: {tariff['days']} дней\n"
-        f"Цена: {tariff['price']} ⭐ Stars\n\n"
-        f"⏳ Ожидайте подтверждения платежа...",
-        parse_mode="HTML"
-    )
+    # Отправляем сообщение без лишних тегов, которые могут вызвать ошибку
+    try:
+        await callback.message.edit_text(
+            f"💎 Оплата подписки{renewal_text}\n\n"
+            f"Тариф: {tariff['name']}\n"
+            f"Срок: {tariff['days']} дней\n"
+            f"Цена: {tariff['price']} ⭐ Stars\n\n"
+            f"Ожидайте подтверждения платежа...",
+            parse_mode=None  # Отключаем HTML, чтобы избежать ошибок парсинга
+        )
+    except Exception as e:
+        # Если не удалось отредактировать, отправляем новое сообщение
+        await callback.message.answer(
+            f"💎 Оплата подписки{renewal_text}\n\n"
+            f"Тариф: {tariff['name']}\n"
+            f"Срок: {tariff['days']} дней\n"
+            f"Цена: {tariff['price']} ⭐ Stars\n\n"
+            f"Ожидайте подтверждения платежа..."
+        )
 
+    # Отправляем инвойс
     try:
         await callback.bot.send_invoice(
             chat_id=user_id,
             title=f"VPN {tariff['name']}",
             description=f"Подписка на {tariff['days']} дней",
-            payload=f"payment_{payment.id}",
+            payload=f"payment_{payment_id}",  # Используем payment_id
             currency="XTR",
             prices=[{"label": tariff['name'], "amount": tariff['price']}],
             provider_token=""
         )
 
-        await callback.message.edit_text(
-            f"💎 <b>Ожидание оплаты</b>\n\n"
+        # Отправляем сообщение об ожидании
+        await callback.message.answer(
+            f"💎 Ожидание оплаты\n\n"
             f"Тариф: {tariff['name']}\n"
             f"Сумма: {tariff['price']} ⭐ Stars\n\n"
-            f"📩 Нажмите на кнопку <b>Оплатить</b> в сообщении ниже",
-            parse_mode="HTML",
+            f"Нажмите на кнопку Оплатить в сообщении ниже",
             reply_markup=get_back_keyboard()
         )
     except Exception as e:
         print(f"Ошибка создания инвойса: {e}")
-        await callback.message.edit_text(
-            f"❌ <b>Ошибка создания платежа</b>\n\n"
+        await callback.message.answer(
+            f"❌ Ошибка создания платежа\n\n"
             f"Текст ошибки: {str(e)}\n\n"
             f"Попробуйте позже или выберите другой тариф.",
-            parse_mode="HTML",
             reply_markup=get_main_keyboard()
         )
     await callback.answer()
