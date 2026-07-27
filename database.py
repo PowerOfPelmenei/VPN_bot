@@ -197,3 +197,21 @@ def get_user_payments(telegram_id: int) -> list:
         return payments
     finally:
         session.close()
+
+
+def get_expiring_subscriptions(days_before: int = 3):
+    """Получить пользователей, у которых подписка истекает через N дней"""
+    session = SessionLocal()
+    try:
+        from datetime import datetime, timedelta
+        start_date = datetime.now()
+        end_date = datetime.now() + timedelta(days=days_before)
+
+        users = session.query(User).filter(
+            User.subscription_active == True,
+            User.subscription_end >= start_date,
+            User.subscription_end <= end_date
+        ).all()
+        return users
+    finally:
+        session.close()

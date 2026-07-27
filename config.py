@@ -24,14 +24,14 @@ TARIFFS = {
     "monthly": {
         "name": "1 месяц",
         "days": 30,
-        "price": 1,
+        "price": 100,
         "group": "Monthly",
         "description": "30 дней доступа"
     },
     "quarterly": {
         "name": "3 месяца",
         "days": 90,
-        "price": 2,
+        "price": 250,
         "group": "Quarterly",
         "description": "90 дней доступа"
     }
